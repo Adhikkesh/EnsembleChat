@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
+	"sync"
 	"time"
 
 	"distributed-chat-coordinator/internal/types"
@@ -104,13 +105,15 @@ func StartRPCServer(ln net.Listener, service *NodeRPC) {
 
 // RPCClient wraps a net/rpc.Client for a specific peer.
 type RPCClient struct {
-	addr   string
-	prefix string
+	addr      string
+	prefix    string
+	mu        sync.Mutex
+	reachable bool // last known state; used to suppress repeated failure logs
 }
 
 // NewRPCClient creates a client that dials the given address.
 func NewRPCClient(addr, prefix string) *RPCClient {
-	return &RPCClient{addr: addr, prefix: prefix}
+	return &RPCClient{addr: addr, prefix: prefix, reachable: true}
 }
 
 // dial connects to the peer, retrying a few times.
@@ -128,12 +131,24 @@ func (c *RPCClient) dial() (*rpc.Client, error) {
 }
 
 // callAsync makes a non-blocking RPC call (fire and forget with logging).
+// Dial failures are logged only once per reachability state change.
 func (c *RPCClient) callAsync(method string, args interface{}) {
 	client, err := c.dial()
 	if err != nil {
-		fmt.Printf("%s⚠️  RPC dial failed for %s: %v\n", c.prefix, method, err)
+		c.mu.Lock()
+		if c.reachable {
+			fmt.Printf("%s⚠️  Peer %s unreachable (will suppress further failures)\n", c.prefix, c.addr)
+			c.reachable = false
+		}
+		c.mu.Unlock()
 		return
 	}
+	c.mu.Lock()
+	if !c.reachable {
+		fmt.Printf("%s✅  Peer %s is reachable again\n", c.prefix, c.addr)
+		c.reachable = true
+	}
+	c.mu.Unlock()
 	defer client.Close()
 
 	var reply Empty

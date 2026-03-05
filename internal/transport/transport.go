@@ -116,18 +116,13 @@ func NewRPCClient(addr, prefix string) *RPCClient {
 	return &RPCClient{addr: addr, prefix: prefix, reachable: true}
 }
 
-// dial connects to the peer, retrying a few times.
+// dial connects to the peer with a single fast attempt.
 func (c *RPCClient) dial() (*rpc.Client, error) {
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		conn, err := net.DialTimeout("tcp", c.addr, 2*time.Second)
-		if err == nil {
-			return rpc.NewClient(conn), nil
-		}
-		lastErr = err
-		time.Sleep(100 * time.Millisecond)
+	conn, err := net.DialTimeout("tcp", c.addr, 500*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s failed: %w", c.addr, err)
 	}
-	return nil, fmt.Errorf("dial %s failed: %w", c.addr, lastErr)
+	return rpc.NewClient(conn), nil
 }
 
 // callAsync makes a non-blocking RPC call (fire and forget with logging).

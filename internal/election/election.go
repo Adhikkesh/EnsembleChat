@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	HeartbeatInterval = 100 * time.Millisecond
+	HeartbeatInterval = 500 * time.Millisecond
 
-	ElectionTimeoutMin = 300 * time.Millisecond
-	ElectionTimeoutMax = 500 * time.Millisecond
+	ElectionTimeoutMin = 2000 * time.Millisecond
+	ElectionTimeoutMax = 4000 * time.Millisecond
 )
 
 type ElectionNode struct {

@@ -12,12 +12,16 @@ import (
 func main() {
 	fmt.Println(types.ColorBold + types.ColorPurple)
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║       DEMO: MUTUAL EXCLUSION (Lease-Based Locking)         ║")
-	fmt.Println("║       Two Servers Fight for the Same Chat Room Lock         ║")
+	fmt.Println("║       DEMO: MUTUAL EXCLUSION (Token Ring Algorithm)        ║")
+	fmt.Println("║       Nodes Compete for Critical Section Access            ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝" + types.ColorReset)
 	fmt.Println()
 
-	fmt.Println(types.ColorYellow + "━━━ STEP 1: Starting 3 Coordinator Nodes ━━━" + types.ColorReset)
+	// ━━━ STEP 1 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 1: Creating 3 Coordinator Nodes in a Token Ring ━━━" + types.ColorReset)
+	fmt.Println("  Ring topology: Node 0 → Node 1 → Node 2 → Node 0")
+	fmt.Println("  Token initially held by: Node 0 (lowest ID)")
+	fmt.Println()
 
 	node0 := coordinator.NewCoordinatorNode(0, []int{1, 2})
 	node1 := coordinator.NewCoordinatorNode(1, []int{0, 2})
@@ -30,127 +34,96 @@ func main() {
 		n.Start()
 	}
 
-	fmt.Println(types.ColorYellow + "⏳ Waiting for leader election..." + types.ColorReset)
+	fmt.Println()
+	fmt.Println(types.ColorYellow + "⏳ Waiting for election and token ring to initialize..." + types.ColorReset)
 	time.Sleep(2 * time.Second)
+	fmt.Println()
 
-	var leader *coordinator.CoordinatorNode
-	for _, n := range nodes {
-		if n.Election.IsLeader() {
-			leader = n
-			break
-		}
+	// ━━━ STEP 2 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 2: Node 0 Requests Critical Section for \"General_Chat\" ━━━" + types.ColorReset)
+	fmt.Println("  Node 0 holds the token, so access should be granted immediately.")
+	fmt.Println()
+
+	resp0 := node0.AcquireLock("General_Chat", "Server_A")
+	fmt.Println()
+
+	if resp0.Granted {
+		fmt.Printf("  %s✅ Server_A (via Node 0): GRANTED — %s%s\n",
+			types.ColorGreen, resp0.Reason, types.ColorReset)
+	} else {
+		fmt.Printf("  %s❌ Server_A (via Node 0): DENIED — %s%s\n",
+			types.ColorRed, resp0.Reason, types.ColorReset)
 	}
+	fmt.Println()
 
-	if leader == nil {
-		fmt.Println(types.ColorRed + "❌ No leader elected. Waiting more..." + types.ColorReset)
-		time.Sleep(3 * time.Second)
-		for _, n := range nodes {
-			if n.Election.IsLeader() {
-				leader = n
-				break
-			}
-		}
-		if leader == nil {
-			fmt.Println(types.ColorRed + "❌ No leader. Exiting." + types.ColorReset)
-			return
-		}
-	}
-
-	fmt.Printf("\n%s👑 Leader: Node %d%s\n\n",
-		types.ColorGreen+types.ColorBold, leader.ID, types.ColorReset)
-
-	fmt.Println(types.ColorYellow + "━━━ STEP 2: Two Servers Racing to Lock \"General_Chat\" ━━━" + types.ColorReset)
-	fmt.Println("  Server_A and Server_B will compete for the same resource...")
+	// ━━━ STEP 3 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 3: Node 1 Requests Critical Section (Must Wait for Token) ━━━" + types.ColorReset)
+	fmt.Println("  Node 1 does NOT have the token. It must wait until the token arrives.")
 	fmt.Println()
 
 	var wg sync.WaitGroup
-	results := make([]types.LockResponse, 2)
+	var resp1 types.LockResponse
 
-	wg.Add(2)
-
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		fmt.Printf("%s🏃 Server_A requesting lock on \"General_Chat\"...%s\n",
-			types.ColorGreen, types.ColorReset)
-		results[0] = leader.AcquireLock("General_Chat", "Server_A")
+		resp1 = node1.AcquireLock("General_Chat", "Server_B")
 	}()
 
-	go func() {
-		defer wg.Done()
-		time.Sleep(10 * time.Millisecond)
-		fmt.Printf("%s🏃 Server_B requesting lock on \"General_Chat\"...%s\n",
-			types.ColorBlue, types.ColorReset)
-		results[1] = leader.AcquireLock("General_Chat", "Server_B")
-	}()
+	// Give a moment for the request to be queued and displayed
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println()
 
+	// ━━━ STEP 4 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 4: Node 0 Releases → Token Passes to Node 1 ━━━" + types.ColorReset)
+	fmt.Println("  When Node 0 exits the critical section, the token is passed to")
+	fmt.Println("  the next node in the ring (Node 1). Since Node 1 is waiting,")
+	fmt.Println("  it immediately enters the critical section.")
+	fmt.Println()
+
+	node0.ReleaseLock("General_Chat", "Server_A")
+
+	// Wait for Node 1 to receive token and get access
 	wg.Wait()
 	fmt.Println()
 
-	fmt.Println(types.ColorYellow + "━━━ STEP 3: Lock Request Results ━━━" + types.ColorReset)
+	if resp1.Granted {
+		fmt.Printf("  %s✅ Server_B (via Node 1): GRANTED — %s%s\n",
+			types.ColorGreen, resp1.Reason, types.ColorReset)
+	}
 	fmt.Println()
 
-	for i, r := range results {
-		serverName := "Server_A"
-		if i == 1 {
-			serverName = "Server_B"
+	// ━━━ STEP 5 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 5: Node 1 Releases → Token Continues Around Ring ━━━" + types.ColorReset)
+	fmt.Println("  After release, the token passes to Node 2, then back to Node 0.")
+	fmt.Println()
+
+	node1.ReleaseLock("General_Chat", "Server_B")
+
+	time.Sleep(600 * time.Millisecond)
+	fmt.Println()
+
+	// ━━━ STEP 6 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 6: Token Ring Status ━━━" + types.ColorReset)
+	for _, n := range nodes {
+		hasToken, inCS, resource, holder := n.TokenRing.GetStatus()
+		status := "waiting for token"
+		if hasToken && inCS {
+			status = fmt.Sprintf("IN CRITICAL SECTION (resource: %s, holder: %s)", resource, holder)
+		} else if hasToken {
+			status = "HOLDING TOKEN (idle)"
 		}
-
-		if r.Granted {
-			fmt.Printf("  %s✅ %s: GRANTED lock on \"%s\" (expires: %s)%s\n",
-				types.ColorGreen, serverName, r.Resource,
-				r.ExpiresAt.Format("15:04:05"), types.ColorReset)
-		} else {
-			fmt.Printf("  %s❌ %s: DENIED lock on \"%s\" — Reason: %s%s\n",
-				types.ColorRed, serverName, r.Resource, r.Reason, types.ColorReset)
-		}
-	}
-	fmt.Println()
-
-	fmt.Println(types.ColorYellow + "━━━ STEP 4: Winner Releases Lock, Loser Retries ━━━" + types.ColorReset)
-	fmt.Println()
-
-	winner := "Server_A"
-	loser := "Server_B"
-	if results[1].Granted {
-		winner = "Server_B"
-		loser = "Server_A"
-	}
-
-	fmt.Printf("  %s releasing lock on \"General_Chat\"...\n", winner)
-	leader.LockMgr.Release("General_Chat", winner)
-	fmt.Println()
-
-	fmt.Printf("  %s retrying lock on \"General_Chat\"...\n", loser)
-	retryResult := leader.AcquireLock("General_Chat", loser)
-
-	fmt.Println()
-	if retryResult.Granted {
-		fmt.Printf("  %s✅ %s: GRANTED lock on retry! (expires: %s)%s\n",
-			types.ColorGreen, loser, retryResult.ExpiresAt.Format("15:04:05"), types.ColorReset)
-	} else {
-		fmt.Printf("  %s❌ %s: Still denied: %s%s\n",
-			types.ColorRed, loser, retryResult.Reason, types.ColorReset)
-	}
-
-	fmt.Println()
-	fmt.Println(types.ColorYellow + "━━━ STEP 5: Lease Expiry (Deadlock Prevention) ━━━" + types.ColorReset)
-	fmt.Println("  If a lock holder crashes without releasing, the lease")
-	fmt.Println("  automatically expires after the TTL, preventing deadlocks.")
-	fmt.Println()
-
-	leases := leader.LockMgr.GetAllLeases()
-	for name, lease := range leases {
-		fmt.Printf("  Active lease: \"%s\" held by [%s], expires at %s\n",
-			name, lease.Holder, lease.ExpiresAt.Format("15:04:05"))
+		fmt.Printf("  Node %d: %s\n", n.ID, status)
 	}
 
 	fmt.Println()
 	fmt.Println(types.ColorPurple + "━━━ DEMO COMPLETE ━━━" + types.ColorReset)
-	fmt.Println("Key takeaways:")
-	fmt.Println("  1. Only ONE server acquired the lock (mutual exclusion)")
-	fmt.Println("  2. The second server was rejected immediately")
-	fmt.Println("  3. After release, the lock becomes available again")
-	fmt.Println("  4. Leases have TTL to prevent deadlocks from crashed holders")
+	fmt.Println("Key takeaways (Token Ring Algorithm):")
+	fmt.Println("  1. A single token circulates: Node 0 → Node 1 → Node 2 → Node 0")
+	fmt.Println("  2. Only the token holder can enter the critical section (mutual exclusion)")
+	fmt.Println("  3. After exiting, the token is passed to the next node in the ring")
+	fmt.Println("  4. Waiting nodes are granted access when the token arrives")
+	fmt.Println("  5. Fairness: every node eventually receives the token (starvation-free)")
 	fmt.Println()
 
 	for _, n := range nodes {

@@ -11,11 +11,12 @@ import (
 func main() {
 	fmt.Println(types.ColorBold + types.ColorGreen)
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║       DEMO: CONSENSUS via Two-Phase Commit (2PC)           ║")
+	fmt.Println("║       DEMO: CONSENSUS via Raft Log Replication             ║")
 	fmt.Println("║       Replicating Chat Room Creation Across 3 Nodes        ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝" + types.ColorReset)
 	fmt.Println()
 
+	// ━━━ STEP 1 ━━━
 	fmt.Println(types.ColorYellow + "━━━ STEP 1: Starting 3 Coordinator Nodes ━━━" + types.ColorReset)
 
 	node0 := coordinator.NewCoordinatorNode(0, []int{1, 2})
@@ -58,13 +59,15 @@ func main() {
 	fmt.Printf("\n%s👑 Leader: Node %d%s\n\n",
 		types.ColorGreen+types.ColorBold, leader.ID, types.ColorReset)
 
-	fmt.Println(types.ColorYellow + "━━━ STEP 2: Creating Chat Room via 2PC ━━━" + types.ColorReset)
+	// ━━━ STEP 2 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 2: Creating Chat Room via Raft Log Replication ━━━" + types.ColorReset)
 	fmt.Println("  The Leader will propose: Create room \"Gaming_Lounge\" on Server_Alpha")
-	fmt.Println("  All followers must agree (vote COMMIT) for the change to be applied.")
+	fmt.Println("  Flow: Leader appends entry → sends AppendEntries to followers →")
+	fmt.Println("        followers replicate → majority reached → entry committed")
 	fmt.Println()
 
 	success := leader.ProposeChange(
-		"tx-room-001",
+		"entry-001",
 		types.ChangeAddRoom,
 		"Gaming_Lounge",
 		"Server_Alpha:9001",
@@ -72,18 +75,19 @@ func main() {
 
 	fmt.Println()
 	if success {
-		fmt.Printf("%s✅ 2PC Transaction COMMITTED — Room created!%s\n",
+		fmt.Printf("%s✅ Entry COMMITTED — Room created via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	} else {
-		fmt.Printf("%s❌ 2PC Transaction ABORTED%s\n",
+		fmt.Printf("%s❌ Entry FAILED to commit%s\n",
 			types.ColorRed+types.ColorBold, types.ColorReset)
 	}
 
+	// ━━━ STEP 3 ━━━
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "━━━ STEP 3: Creating a Second Chat Room via 2PC ━━━" + types.ColorReset)
+	fmt.Println(types.ColorYellow + "━━━ STEP 3: Creating a Second Chat Room ━━━" + types.ColorReset)
 
 	success2 := leader.ProposeChange(
-		"tx-room-002",
+		"entry-002",
 		types.ChangeAddRoom,
 		"Study_Group",
 		"Server_Beta:9002",
@@ -91,15 +95,16 @@ func main() {
 
 	fmt.Println()
 	if success2 {
-		fmt.Printf("%s✅ 2PC Transaction COMMITTED — Room created!%s\n",
+		fmt.Printf("%s✅ Entry COMMITTED — Room created via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
+	// ━━━ STEP 4 ━━━
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "━━━ STEP 4: Registering New Chat Server via 2PC ━━━" + types.ColorReset)
+	fmt.Println(types.ColorYellow + "━━━ STEP 4: Registering New Chat Server via Raft ━━━" + types.ColorReset)
 
 	success3 := leader.ProposeChange(
-		"tx-server-001",
+		"entry-003",
 		types.ChangeAddServer,
 		"Server_Gamma",
 		"192.168.1.103:9003",
@@ -107,15 +112,43 @@ func main() {
 
 	fmt.Println()
 	if success3 {
-		fmt.Printf("%s✅ 2PC Transaction COMMITTED — Server registered!%s\n",
+		fmt.Printf("%s✅ Entry COMMITTED — Server registered via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
+	// ━━━ STEP 5 ━━━
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "━━━ STEP 5: Verifying State Replication Across All Nodes ━━━" + types.ColorReset)
+	fmt.Println(types.ColorYellow + "━━━ STEP 5: Verifying Raft Log Replication Across All Nodes ━━━" + types.ColorReset)
 	fmt.Println()
 
-	leaderRT := leader.TwoPCCoord.GetRoutingTable()
+	// Allow time for commit index to propagate to all followers
+	time.Sleep(500 * time.Millisecond)
+
+	for _, n := range nodes {
+		role := "Follower"
+		if n.Election.IsLeader() {
+			role = "Leader"
+		}
+		log := n.RaftLog.GetLog()
+		commitIdx := n.RaftLog.GetCommitIndex()
+		fmt.Printf("  %s📋 %s (Node %d) — Log: %d entries, CommitIndex: %d%s\n",
+			types.ColorCyan, role, n.ID, len(log), commitIdx, types.ColorReset)
+		for _, entry := range log {
+			committed := ""
+			if entry.Index <= commitIdx {
+				committed = " ✅ COMMITTED"
+			}
+			fmt.Printf("     [#%d term=%d] %s \"%s\" → %s%s\n",
+				entry.Index, entry.Term, entry.Change, entry.Key, entry.Value, committed)
+		}
+		fmt.Println()
+	}
+
+	// ━━━ STEP 6 ━━━
+	fmt.Println(types.ColorYellow + "━━━ STEP 6: Verifying State Machine (Routing Table) Consistency ━━━" + types.ColorReset)
+	fmt.Println()
+
+	leaderRT := leader.RaftLog.GetRoutingTable()
 	fmt.Printf("  %s📋 Leader (Node %d) Routing Table:%s\n",
 		types.ColorGreen, leader.ID, types.ColorReset)
 	printRoutingTable(leaderRT)
@@ -126,9 +159,10 @@ func main() {
 		}
 		fmt.Printf("  %s📋 Follower (Node %d) Routing Table:%s\n",
 			types.ColorBlue, n.ID, types.ColorReset)
-		printRoutingTable(n.TwoPCPart.RoutingTable)
+		printRoutingTable(n.RaftLog.GetRoutingTable())
 	}
 
+	// ━━━ Consistency Check ━━━
 	fmt.Println(types.ColorYellow + "━━━ Consistency Check ━━━" + types.ColorReset)
 
 	allConsistent := true
@@ -136,7 +170,7 @@ func main() {
 		if n.ID == leader.ID {
 			continue
 		}
-		followerRT := n.TwoPCPart.RoutingTable
+		followerRT := n.RaftLog.GetRoutingTable()
 		if len(followerRT.Rooms) != len(leaderRT.Rooms) {
 			allConsistent = false
 			fmt.Printf("  %s❌ Node %d has %d rooms, Leader has %d rooms%s\n",
@@ -156,12 +190,13 @@ func main() {
 
 	fmt.Println()
 	fmt.Println(types.ColorGreen + "━━━ DEMO COMPLETE ━━━" + types.ColorReset)
-	fmt.Println("Key takeaways:")
-	fmt.Println("  1. Leader initiated 2PC: sent PREPARE to all followers")
-	fmt.Println("  2. All followers validated and voted COMMIT")
-	fmt.Println("  3. Leader sent COMMIT → all nodes applied the change")
-	fmt.Println("  4. Routing table is now identical across all nodes (consistency!)")
-	fmt.Println("  5. If any node had voted ABORT, the transaction would be rolled back")
+	fmt.Println("Key takeaways (Raft Log Replication):")
+	fmt.Println("  1. Leader appends entry to its log")
+	fmt.Println("  2. Leader sends AppendEntries RPC to all followers")
+	fmt.Println("  3. Followers append entries and acknowledge")
+	fmt.Println("  4. Once majority (2/3) replicate, entry is committed")
+	fmt.Println("  5. Committed entries are applied to the state machine")
+	fmt.Println("  6. All nodes converge to the same state (strong consistency)")
 	fmt.Println()
 
 	for _, n := range nodes {

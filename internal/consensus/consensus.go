@@ -9,319 +9,502 @@ import (
 )
 
 const (
-	PrepareTimeout = 3 * time.Second
+	// ReplicationTimeout is how long the leader waits for majority replication.
+	ReplicationTimeout = 5 * time.Second
 )
 
-type TxState int
+// RaftLog implements Raft Log Replication for distributed consensus.
+//
+// Algorithm Overview (from the Raft paper):
+//  1. A client sends a command to the leader.
+//  2. The leader appends the command as a new entry in its log.
+//  3. The leader sends AppendEntries RPCs to all followers in parallel.
+//  4. Followers append the entries to their logs and acknowledge.
+//  5. Once a majority of nodes have replicated the entry, it is committed.
+//  6. The leader applies the committed entry to its state machine.
+//  7. The leader notifies followers of the new commit index.
+//  8. Followers apply committed entries to their state machines.
+//
+// Key Safety Properties:
+//   - Log Matching: If two logs contain an entry with the same index and term,
+//     then the logs are identical in all preceding entries.
+//   - Leader Completeness: If an entry is committed in a given term, it will
+//     be present in the logs of all leaders for higher-term numbers.
+//   - State Machine Safety: If a server has applied a log entry at a given
+//     index, no other server will ever apply a different entry for that index.
+type RaftLog struct {
+	mu sync.Mutex
 
-const (
-	TxPending   TxState = iota
-	TxPrepared
-	TxCommitted
-	TxAborted
-)
+	nodeID      int
+	prefix      string
+	isLeader    bool
+	currentTerm int
 
-func (s TxState) String() string {
-	switch s {
-	case TxPending:
-		return "PENDING"
-	case TxPrepared:
-		return "PREPARED"
-	case TxCommitted:
-		return "COMMITTED"
-	case TxAborted:
-		return "ABORTED"
-	default:
-		return "UNKNOWN"
-	}
-}
+	// Replicated log (persistent state)
+	log []types.LogEntry
 
-type Transaction struct {
-	ID            string                 `json:"id"`
-	Change        types.ChangeType       `json:"change_type"`
-	Key           string                 `json:"key"`
-	Value         string                 `json:"value"`
-	State         TxState                `json:"state"`
-	Participants  []int                  `json:"participants"`
-	Votes         map[int]bool           `json:"votes"`
-	CreatedAt     time.Time              `json:"created_at"`
-}
+	// Volatile state — all servers
+	commitIndex int // index of highest log entry known to be committed
+	lastApplied int // index of highest log entry applied to state machine
 
-type Coordinator struct {
-	mu     sync.Mutex
-	nodeID int
-	prefix string
+	// Volatile state — leaders only (reinitialized after each election)
+	nextIndex  map[int]int // for each follower: index of next log entry to send
+	matchIndex map[int]int // for each follower: index of highest entry known to be replicated
 
-	transactions map[string]*Transaction
-
+	// State machine (the replicated application state)
 	RoutingTable *types.RoutingTable
 
-	OnSendPrepare func(participantID int, req types.PrepareRequest)
-	OnSendCommit  func(participantID int, req types.CommitRequest)
-	OnSendAbort   func(participantID int, req types.AbortRequest)
+	// Peer IDs
+	peers []int
 
-	PrepareResponseCh chan types.PrepareResponse
+	// Callbacks for sending RPCs
+	OnSendAppendEntries     func(followerID int, req types.AppendEntriesRequest)
+	OnSendAppendEntriesResp func(leaderID int, resp types.AppendEntriesResponse)
+
+	// Channel for leader to receive responses from followers
+	AppendEntriesRespCh chan types.AppendEntriesResponse
+
+	stopCh chan struct{}
 }
 
-func NewCoordinator(nodeID int) *Coordinator {
-	return &Coordinator{
-		nodeID:            nodeID,
-		prefix:            types.LogPrefix(nodeID, "2PC-COORD"),
-		transactions:      make(map[string]*Transaction),
-		RoutingTable:      types.NewRoutingTable(),
-		PrepareResponseCh: make(chan types.PrepareResponse, 100),
+// NewRaftLog creates a new Raft log replication manager.
+func NewRaftLog(nodeID int, peers []int) *RaftLog {
+	return &RaftLog{
+		nodeID:              nodeID,
+		prefix:              types.LogPrefix(nodeID, "RAFT-LOG"),
+		log:                 make([]types.LogEntry, 0),
+		commitIndex:         -1,
+		lastApplied:         -1,
+		nextIndex:           make(map[int]int),
+		matchIndex:          make(map[int]int),
+		RoutingTable:        types.NewRoutingTable(),
+		peers:               peers,
+		AppendEntriesRespCh: make(chan types.AppendEntriesResponse, 100),
+		stopCh:              make(chan struct{}),
 	}
 }
 
-func (c *Coordinator) Propose(txID string, change types.ChangeType, key, value string, participants []int) bool {
-	c.mu.Lock()
+// ============================================================
+// Leader-side methods
+// ============================================================
 
-	tx := &Transaction{
-		ID:           txID,
-		Change:       change,
-		Key:          key,
-		Value:        value,
-		State:        TxPending,
-		Participants: participants,
-		Votes:        make(map[int]bool),
-		CreatedAt:    time.Now(),
+// BecomeLeader reinitializes volatile leader state after winning an election.
+// Called by the election module when this node becomes leader.
+func (r *RaftLog) BecomeLeader(term int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.isLeader = true
+	r.currentTerm = term
+
+	// Initialize nextIndex to the end of the leader's log
+	// Initialize matchIndex to -1 (no entries replicated yet)
+	lastIdx := len(r.log)
+	for _, pid := range r.peers {
+		r.nextIndex[pid] = lastIdx
+		r.matchIndex[pid] = -1
 	}
-	c.transactions[txID] = tx
-	c.mu.Unlock()
+
+	fmt.Printf("%s👑 Initialized as leader for term %d (log length: %d)\n",
+		r.prefix, term, len(r.log))
+}
+
+// BecomeFollower updates state when this node steps down from being leader.
+func (r *RaftLog) BecomeFollower(term int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.isLeader = false
+	r.currentTerm = term
+}
+
+// ProposeEntry is called on the leader to propose a new log entry.
+// It appends the entry to the leader's log, replicates to followers via
+// AppendEntries RPCs, and waits for majority confirmation.
+// Returns true if the entry was committed (majority replicated).
+func (r *RaftLog) ProposeEntry(change types.ChangeType, key, value string) bool {
+	r.mu.Lock()
+
+	if !r.isLeader {
+		fmt.Printf("%s⚠️ Cannot propose — not the leader\n", r.prefix)
+		r.mu.Unlock()
+		return false
+	}
+
+	// Step 1: Append entry to leader's log
+	entry := types.LogEntry{
+		Term:   r.currentTerm,
+		Index:  len(r.log),
+		Change: change,
+		Key:    key,
+		Value:  value,
+	}
+	r.log = append(r.log, entry)
 
 	fmt.Printf("%s\n", "══════════════════════════════════════════════════════════════")
-	fmt.Printf("%s📋 INITIATING 2PC TRANSACTION: %s\n", c.prefix, txID)
-	fmt.Printf("%s   Change: %s | Key: \"%s\" | Value: \"%s\"\n", c.prefix, change, key, value)
-	fmt.Printf("%s   Participants: %v\n", c.prefix, participants)
+	fmt.Printf("%s📋 PROPOSING LOG ENTRY #%d (Raft Log Replication)\n", r.prefix, entry.Index)
+	fmt.Printf("%s   Term: %d | Change: %s | Key: \"%s\" | Value: \"%s\"\n",
+		r.prefix, entry.Term, change, key, value)
+	fmt.Printf("%s   Replicating to %d followers via AppendEntries RPC...\n", r.prefix, len(r.peers))
 	fmt.Printf("%s\n", "══════════════════════════════════════════════════════════════")
 
-	req := types.PrepareRequest{
-		TransactionID: txID,
-		Change:        change,
-		Key:           key,
-		Value:         value,
+	r.mu.Unlock()
+
+	// Step 2: Send AppendEntries to all followers
+	r.sendAppendEntriesToAll()
+
+	// Step 3: Wait for majority replication
+	committed := r.waitForMajority(entry.Index)
+
+	if committed {
+		// Step 4: Send one more round of AppendEntries to propagate the
+		// updated commit index to all followers (Raft §5.3)
+		r.sendAppendEntriesToAll()
 	}
 
-	fmt.Printf("%s📤 PHASE 1: Sending PREPARE to %d participants...\n",
-		c.prefix, len(participants))
-
-	for _, pid := range participants {
-		if c.OnSendPrepare != nil {
-			c.OnSendPrepare(pid, req)
-		}
-	}
-
-	return c.collectVotes(tx)
+	return committed
 }
 
-func (c *Coordinator) collectVotes(tx *Transaction) bool {
-	deadline := time.After(PrepareTimeout)
-	votesNeeded := len(tx.Participants)
-	votesReceived := 0
+// sendAppendEntriesToAll sends AppendEntries RPCs to every follower.
+func (r *RaftLog) sendAppendEntriesToAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	fmt.Printf("%s⏳ Waiting for %d votes (timeout: %v)...\n",
-		c.prefix, votesNeeded, PrepareTimeout)
+	for _, pid := range r.peers {
+		r.sendAppendEntriesTo(pid)
+	}
+}
 
-	for votesReceived < votesNeeded {
+// sendAppendEntriesTo sends an AppendEntries RPC to a specific follower.
+// Caller must hold r.mu.
+func (r *RaftLog) sendAppendEntriesTo(followerID int) {
+	nextIdx := r.nextIndex[followerID]
+
+	// Determine prevLogIndex and prevLogTerm
+	prevLogIndex := nextIdx - 1
+	prevLogTerm := -1
+	if prevLogIndex >= 0 && prevLogIndex < len(r.log) {
+		prevLogTerm = r.log[prevLogIndex].Term
+	}
+
+	// Collect entries from nextIndex onwards
+	var entries []types.LogEntry
+	if nextIdx < len(r.log) {
+		entries = make([]types.LogEntry, len(r.log)-nextIdx)
+		copy(entries, r.log[nextIdx:])
+	}
+
+	req := types.AppendEntriesRequest{
+		Term:         r.currentTerm,
+		LeaderID:     r.nodeID,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: r.commitIndex,
+	}
+
+	if len(entries) > 0 {
+		fmt.Printf("%s📤 Sending AppendEntries to Node %d: %d entries (prevIdx=%d, prevTerm=%d)\n",
+			r.prefix, followerID, len(entries), prevLogIndex, prevLogTerm)
+	}
+
+	if r.OnSendAppendEntries != nil {
+		go r.OnSendAppendEntries(followerID, req)
+	}
+}
+
+// waitForMajority blocks until the target entry is committed by majority or timeout.
+func (r *RaftLog) waitForMajority(targetIndex int) bool {
+	deadline := time.After(ReplicationTimeout)
+	totalNodes := len(r.peers) + 1
+	majority := (totalNodes / 2) + 1
+
+	fmt.Printf("%s⏳ Waiting for majority (%d/%d nodes) to replicate entry #%d...\n",
+		r.prefix, majority, totalNodes, targetIndex)
+
+	for {
 		select {
-		case resp := <-c.PrepareResponseCh:
-			if resp.TransactionID != tx.ID {
-				continue
-			}
+		case resp := <-r.AppendEntriesRespCh:
+			r.handleAppendEntriesResponse(resp)
 
-			c.mu.Lock()
-			tx.Votes[resp.ParticipantID] = resp.VoteCommit
-			votesReceived++
+			r.mu.Lock()
+			if r.commitIndex >= targetIndex {
+				r.applyCommitted()
+				r.mu.Unlock()
 
-			if resp.VoteCommit {
-				fmt.Printf("%s   ✅ Node %d voted COMMIT (%d/%d)\n",
-					c.prefix, resp.ParticipantID, votesReceived, votesNeeded)
-			} else {
-				fmt.Printf("%s   ❌ Node %d voted ABORT (%d/%d)\n",
-					c.prefix, resp.ParticipantID, votesReceived, votesNeeded)
-				c.mu.Unlock()
-				c.abortTransaction(tx, fmt.Sprintf("Node %d voted ABORT", resp.ParticipantID))
-				return false
+				fmt.Printf("%s✅ ═══════════════════════════════════════════\n", r.prefix)
+				fmt.Printf("%s✅ ENTRY #%d COMMITTED (majority reached)\n", r.prefix, targetIndex)
+				fmt.Printf("%s✅ ═══════════════════════════════════════════\n", r.prefix)
+				return true
 			}
-			c.mu.Unlock()
+			r.mu.Unlock()
 
 		case <-deadline:
-			c.abortTransaction(tx, "timeout waiting for participant votes")
+			fmt.Printf("%s❌ Timeout waiting for majority replication of entry #%d\n",
+				r.prefix, targetIndex)
+			return false
+
+		case <-r.stopCh:
 			return false
 		}
 	}
-
-	return c.commitTransaction(tx)
 }
 
-func (c *Coordinator) commitTransaction(tx *Transaction) bool {
-	c.mu.Lock()
-	tx.State = TxCommitted
+// handleAppendEntriesResponse processes a response from a follower.
+func (r *RaftLog) handleAppendEntriesResponse(resp types.AppendEntriesResponse) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	c.applyChange(tx)
-	c.mu.Unlock()
-
-	fmt.Printf("%s📤 PHASE 2: All voted COMMIT → Sending COMMIT to all participants\n", c.prefix)
-
-	commitReq := types.CommitRequest{
-		TransactionID: tx.ID,
-	}
-
-	for _, pid := range tx.Participants {
-		if c.OnSendCommit != nil {
-			c.OnSendCommit(pid, commitReq)
-		}
-	}
-
-	fmt.Printf("%s✅ ═══════════════════════════════════════════\n", c.prefix)
-	fmt.Printf("%s✅ TRANSACTION %s COMMITTED SUCCESSFULLY\n", c.prefix, tx.ID)
-	fmt.Printf("%s✅ ═══════════════════════════════════════════\n", c.prefix)
-
-	return true
-}
-
-func (c *Coordinator) abortTransaction(tx *Transaction, reason string) {
-	c.mu.Lock()
-	tx.State = TxAborted
-	c.mu.Unlock()
-
-	fmt.Printf("%s❌ PHASE 2: ABORTING transaction %s — Reason: %s\n",
-		c.prefix, tx.ID, reason)
-
-	abortReq := types.AbortRequest{
-		TransactionID: tx.ID,
-		Reason:        reason,
-	}
-
-	for _, pid := range tx.Participants {
-		if c.OnSendAbort != nil {
-			c.OnSendAbort(pid, abortReq)
-		}
-	}
-
-	fmt.Printf("%s❌ Transaction %s ABORTED\n", c.prefix, tx.ID)
-}
-
-func (c *Coordinator) applyChange(tx *Transaction) {
-	switch tx.Change {
-	case types.ChangeAddServer:
-		c.RoutingTable.Servers[tx.Key] = tx.Value
-		fmt.Printf("%s📝 Applied: Server \"%s\" → %s\n", c.prefix, tx.Key, tx.Value)
-
-	case types.ChangeAddRoom:
-		c.RoutingTable.Rooms[tx.Key] = &types.RoutingEntry{
-			RoomName:   tx.Key,
-			ServerAddr: tx.Value,
-			CreatedAt:  time.Now(),
-		}
-		fmt.Printf("%s📝 Applied: Room \"%s\" → server %s\n", c.prefix, tx.Key, tx.Value)
-	}
-}
-
-func (c *Coordinator) GetRoutingTable() *types.RoutingTable {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.RoutingTable
-}
-
-type Participant struct {
-	mu     sync.Mutex
-	nodeID int
-	prefix string
-
-	RoutingTable *types.RoutingTable
-
-	pending map[string]*types.PrepareRequest
-
-	OnSendVote func(resp types.PrepareResponse)
-}
-
-func NewParticipant(nodeID int) *Participant {
-	return &Participant{
-		nodeID:       nodeID,
-		prefix:       types.LogPrefix(nodeID, "2PC-PART"),
-		RoutingTable: types.NewRoutingTable(),
-		pending:      make(map[string]*types.PrepareRequest),
-	}
-}
-
-func (p *Participant) HandlePrepare(req types.PrepareRequest) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	fmt.Printf("%s📩 Received PREPARE for tx %s: %s \"%s\"\n",
-		p.prefix, req.TransactionID, req.Change, req.Key)
-
-	voteCommit := true
-	reason := ""
-
-	switch req.Change {
-	case types.ChangeAddRoom:
-		if _, exists := p.RoutingTable.Rooms[req.Key]; exists {
-			voteCommit = false
-			reason = fmt.Sprintf("room \"%s\" already exists", req.Key)
-		}
-	case types.ChangeAddServer:
-		if _, exists := p.RoutingTable.Servers[req.Key]; exists {
-			voteCommit = false
-			reason = fmt.Sprintf("server \"%s\" already registered", req.Key)
-		}
-	}
-
-	if voteCommit {
-		p.pending[req.TransactionID] = &req
-		fmt.Printf("%s✅ Voting COMMIT for tx %s\n", p.prefix, req.TransactionID)
-	} else {
-		fmt.Printf("%s❌ Voting ABORT for tx %s — %s\n", p.prefix, req.TransactionID, reason)
-	}
-
-	resp := types.PrepareResponse{
-		TransactionID: req.TransactionID,
-		VoteCommit:    voteCommit,
-		ParticipantID: p.nodeID,
-	}
-
-	if p.OnSendVote != nil {
-		go p.OnSendVote(resp)
-	}
-}
-
-func (p *Participant) HandleCommit(req types.CommitRequest) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	pending, ok := p.pending[req.TransactionID]
-	if !ok {
-		fmt.Printf("%s⚠️  Received COMMIT for unknown tx %s\n",
-			p.prefix, req.TransactionID)
+	// If the follower's term is higher, step down
+	if resp.Term > r.currentTerm {
+		fmt.Printf("%s📉 Received higher term %d from Node %d. Stepping down.\n",
+			r.prefix, resp.Term, resp.FollowerID)
+		r.isLeader = false
+		r.currentTerm = resp.Term
 		return
 	}
 
-	switch pending.Change {
-	case types.ChangeAddRoom:
-		p.RoutingTable.Rooms[pending.Key] = &types.RoutingEntry{
-			RoomName:   pending.Key,
-			ServerAddr: pending.Value,
-			CreatedAt:  time.Now(),
+	if resp.Success {
+		// Update matchIndex and nextIndex for this follower
+		r.matchIndex[resp.FollowerID] = resp.MatchIndex
+		r.nextIndex[resp.FollowerID] = resp.MatchIndex + 1
+
+		fmt.Printf("%s   ✅ Node %d replicated up to index %d\n",
+			r.prefix, resp.FollowerID, resp.MatchIndex)
+
+		// Try to advance commit index
+		r.tryAdvanceCommitIndex()
+	} else {
+		// Decrement nextIndex and retry (log inconsistency)
+		if r.nextIndex[resp.FollowerID] > 0 {
+			r.nextIndex[resp.FollowerID]--
 		}
-		fmt.Printf("%s📝 COMMITTED: Room \"%s\" → server %s\n",
-			p.prefix, pending.Key, pending.Value)
+		fmt.Printf("%s   ❌ Node %d rejected AppendEntries. Retrying with nextIndex=%d\n",
+			r.prefix, resp.FollowerID, r.nextIndex[resp.FollowerID])
 
-	case types.ChangeAddServer:
-		p.RoutingTable.Servers[pending.Key] = pending.Value
-		fmt.Printf("%s📝 COMMITTED: Server \"%s\" → %s\n",
-			p.prefix, pending.Key, pending.Value)
+		// Retry with decremented nextIndex
+		r.sendAppendEntriesTo(resp.FollowerID)
 	}
-
-	delete(p.pending, req.TransactionID)
 }
 
-func (p *Participant) HandleAbort(req types.AbortRequest) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// tryAdvanceCommitIndex checks if the commit index can be advanced.
+// Raft rule: a log entry is committed if stored on a majority of servers
+// AND the entry's term matches the leader's current term. Must hold r.mu.
+func (r *RaftLog) tryAdvanceCommitIndex() {
+	for n := len(r.log) - 1; n > r.commitIndex; n-- {
+		if r.log[n].Term != r.currentTerm {
+			continue
+		}
 
-	fmt.Printf("%s🗑  ABORTED tx %s — Reason: %s\n",
-		p.prefix, req.TransactionID, req.Reason)
+		// Count how many nodes have this entry (leader always has it)
+		count := 1
+		for _, pid := range r.peers {
+			if r.matchIndex[pid] >= n {
+				count++
+			}
+		}
 
-	delete(p.pending, req.TransactionID)
+		totalNodes := len(r.peers) + 1
+		majority := (totalNodes / 2) + 1
+
+		if count >= majority {
+			oldCommit := r.commitIndex
+			r.commitIndex = n
+			fmt.Printf("%s📊 Commit index advanced: %d → %d (replicated on %d/%d nodes)\n",
+				r.prefix, oldCommit, n, count, totalNodes)
+			break
+		}
+	}
+}
+
+// applyCommitted applies all committed but not-yet-applied entries to the
+// state machine. Must hold r.mu.
+func (r *RaftLog) applyCommitted() {
+	for r.lastApplied < r.commitIndex {
+		r.lastApplied++
+		entry := r.log[r.lastApplied]
+		r.applyEntry(entry)
+	}
+}
+
+// applyEntry applies a single log entry to the state machine. Must hold r.mu.
+func (r *RaftLog) applyEntry(entry types.LogEntry) {
+	switch entry.Change {
+	case types.ChangeAddRoom:
+		r.RoutingTable.Rooms[entry.Key] = &types.RoutingEntry{
+			RoomName:   entry.Key,
+			ServerAddr: entry.Value,
+			CreatedAt:  time.Now(),
+		}
+		fmt.Printf("%s📝 Applied entry #%d to state machine: Room \"%s\" → %s\n",
+			r.prefix, entry.Index, entry.Key, entry.Value)
+
+	case types.ChangeAddServer:
+		r.RoutingTable.Servers[entry.Key] = entry.Value
+		fmt.Printf("%s📝 Applied entry #%d to state machine: Server \"%s\" → %s\n",
+			r.prefix, entry.Index, entry.Key, entry.Value)
+	}
+}
+
+// ============================================================
+// Follower-side methods
+// ============================================================
+
+// HandleAppendEntries processes an AppendEntries RPC from the leader.
+// This implements the follower-side of Raft log replication:
+//  1. Reject if sender's term < receiver's current term.
+//  2. Reject if log doesn't contain entry at prevLogIndex with prevLogTerm.
+//  3. Delete conflicting entries and append any new entries.
+//  4. Update commitIndex if leader's commitIndex is higher.
+func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
+	r.mu.Lock()
+
+	// Rule 1: Reply false if term < currentTerm (§5.1)
+	if req.Term < r.currentTerm {
+		fmt.Printf("%s❌ Rejected AppendEntries from Node %d (term %d < our term %d)\n",
+			r.prefix, req.LeaderID, req.Term, r.currentTerm)
+		resp := types.AppendEntriesResponse{
+			Term:       r.currentTerm,
+			Success:    false,
+			FollowerID: r.nodeID,
+			MatchIndex: -1,
+		}
+		r.mu.Unlock()
+		if r.OnSendAppendEntriesResp != nil {
+			r.OnSendAppendEntriesResp(req.LeaderID, resp)
+		}
+		return
+	}
+
+	r.currentTerm = req.Term
+
+	// Rule 2: Reply false if log doesn't contain entry at prevLogIndex
+	// whose term matches prevLogTerm (§5.3)
+	if req.PrevLogIndex >= 0 {
+		if req.PrevLogIndex >= len(r.log) {
+			fmt.Printf("%s❌ Log too short: prevLogIndex=%d but log length=%d\n",
+				r.prefix, req.PrevLogIndex, len(r.log))
+			resp := types.AppendEntriesResponse{
+				Term:       r.currentTerm,
+				Success:    false,
+				FollowerID: r.nodeID,
+				MatchIndex: len(r.log) - 1,
+			}
+			r.mu.Unlock()
+			if r.OnSendAppendEntriesResp != nil {
+				r.OnSendAppendEntriesResp(req.LeaderID, resp)
+			}
+			return
+		}
+		if r.log[req.PrevLogIndex].Term != req.PrevLogTerm {
+			fmt.Printf("%s❌ Log mismatch at index %d: expected term %d, got term %d. Truncating.\n",
+				r.prefix, req.PrevLogIndex, req.PrevLogTerm, r.log[req.PrevLogIndex].Term)
+			// Delete the conflicting entry and everything after it
+			r.log = r.log[:req.PrevLogIndex]
+			resp := types.AppendEntriesResponse{
+				Term:       r.currentTerm,
+				Success:    false,
+				FollowerID: r.nodeID,
+				MatchIndex: len(r.log) - 1,
+			}
+			r.mu.Unlock()
+			if r.OnSendAppendEntriesResp != nil {
+				r.OnSendAppendEntriesResp(req.LeaderID, resp)
+			}
+			return
+		}
+	}
+
+	// Rule 3: If an existing entry conflicts with a new one (same index but
+	// different terms), delete the existing entry and all that follow it.
+	// Append any new entries not already in the log. (§5.3)
+	insertIdx := req.PrevLogIndex + 1
+	for i, entry := range req.Entries {
+		logIdx := insertIdx + i
+		if logIdx < len(r.log) {
+			if r.log[logIdx].Term != entry.Term {
+				// Conflict detected — truncate and append remaining
+				r.log = r.log[:logIdx]
+				r.log = append(r.log, req.Entries[i:]...)
+				break
+			}
+			// Entry already exists with same term, skip
+		} else {
+			// Append all remaining new entries
+			r.log = append(r.log, req.Entries[i:]...)
+			break
+		}
+	}
+
+	if len(req.Entries) > 0 {
+		fmt.Printf("%s📥 Appended %d entries from leader (log length now: %d)\n",
+			r.prefix, len(req.Entries), len(r.log))
+	}
+
+	// Rule 4: If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry) (§5.3)
+	if req.LeaderCommit > r.commitIndex {
+		oldCommit := r.commitIndex
+		lastNewIdx := len(r.log) - 1
+		if req.LeaderCommit < lastNewIdx {
+			r.commitIndex = req.LeaderCommit
+		} else {
+			r.commitIndex = lastNewIdx
+		}
+		if r.commitIndex > oldCommit {
+			fmt.Printf("%s📊 Commit index updated: %d → %d\n",
+				r.prefix, oldCommit, r.commitIndex)
+			r.applyCommitted()
+		}
+	}
+
+	matchIdx := len(r.log) - 1
+	resp := types.AppendEntriesResponse{
+		Term:       r.currentTerm,
+		Success:    true,
+		FollowerID: r.nodeID,
+		MatchIndex: matchIdx,
+	}
+
+	r.mu.Unlock()
+
+	if r.OnSendAppendEntriesResp != nil {
+		r.OnSendAppendEntriesResp(req.LeaderID, resp)
+	}
+}
+
+// ============================================================
+// Query methods
+// ============================================================
+
+// GetLog returns a copy of the replicated log.
+func (r *RaftLog) GetLog() []types.LogEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copied := make([]types.LogEntry, len(r.log))
+	copy(copied, r.log)
+	return copied
+}
+
+// GetCommitIndex returns the current commit index.
+func (r *RaftLog) GetCommitIndex() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.commitIndex
+}
+
+// GetRoutingTable returns the routing table (state machine).
+func (r *RaftLog) GetRoutingTable() *types.RoutingTable {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.RoutingTable
+}
+
+// Stop signals the Raft log module to stop.
+func (r *RaftLog) Stop() {
+	select {
+	case <-r.stopCh:
+	default:
+		close(r.stopCh)
+	}
 }

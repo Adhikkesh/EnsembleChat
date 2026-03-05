@@ -1,11 +1,10 @@
 package coordinator
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
-	"time"
 
 	"distributed-chat-coordinator/internal/consensus"
 	"distributed-chat-coordinator/internal/election"
@@ -14,57 +13,73 @@ import (
 	"distributed-chat-coordinator/internal/types"
 )
 
+// CoordinatorNode represents a single node in the coordination ensemble.
+// It integrates three distributed algorithms:
+//   - Raft Leader Election (election module)
+//   - Token Ring Mutual Exclusion (lock module)
+//   - Raft Log Replication for Consensus (consensus module)
 type CoordinatorNode struct {
 	mu sync.Mutex
 
 	ID        int
 	Addr      string
 	Peers     []*CoordinatorNode
-	PeerAddrs map[int]string
+	PeerAddrs map[int]string // peerID → "host:port"
 
-	Election   *election.ElectionNode
-	LockMgr    *lock.LockManager
-	TwoPCCoord *consensus.Coordinator
-	TwoPCPart  *consensus.Participant
+	Election  *election.ElectionNode
+	TokenRing *lock.TokenRingManager
+	RaftLog   *consensus.RaftLog
 
-	listener net.Listener
-	prefix   string
-	alive    bool
-	stopCh   chan struct{}
+	listener   net.Listener
+	rpcClients map[int]*transport.RPCClient // lazy-initialized per peer
+	prefix     string
+	alive      bool
+	stopCh     chan struct{}
 }
 
+// NewCoordinatorNode creates a new coordinator node with all three algorithms.
 func NewCoordinatorNode(id int, peerIDs []int) *CoordinatorNode {
+	// Build ring order: all node IDs sorted for a deterministic ring
+	allNodes := make([]int, 0, len(peerIDs)+1)
+	allNodes = append(allNodes, id)
+	allNodes = append(allNodes, peerIDs...)
+	sort.Ints(allNodes)
+
 	node := &CoordinatorNode{
 		ID:         id,
 		prefix:     types.LogPrefix(id, "COORDINATOR"),
 		alive:      true,
 		stopCh:     make(chan struct{}),
 		PeerAddrs:  make(map[int]string),
+		rpcClients: make(map[int]*transport.RPCClient),
 		Election:   election.NewElectionNode(id, peerIDs),
-		LockMgr:    lock.NewLockManager(id, 10*time.Second),
-		TwoPCCoord: consensus.NewCoordinator(id),
-		TwoPCPart:  consensus.NewParticipant(id),
+		TokenRing:  lock.NewTokenRingManager(id, allNodes, allNodes[0]), // lowest ID starts with token
+		RaftLog:    consensus.NewRaftLog(id, peerIDs),
 	}
 
+	// Wire election callbacks to update the Raft log module
 	node.Election.OnBecomeLeader = func(term int) {
-		fmt.Printf("%s👑 I am now the LEADER (term %d). Starting lock manager.\n",
-			node.prefix, term)
-		node.LockMgr.Start()
+		fmt.Printf("%s👑 I am now the LEADER (term %d)\n", node.prefix, term)
+		node.RaftLog.BecomeLeader(term)
 	}
 
 	node.Election.OnBecomeFollower = func(leaderID, term int) {
 		fmt.Printf("%s📥 Following Leader Node %d (term %d)\n",
 			node.prefix, leaderID, term)
+		node.RaftLog.BecomeFollower(term)
 	}
 
 	return node
 }
 
+// Start begins the election and token ring modules.
 func (n *CoordinatorNode) Start() {
 	fmt.Printf("%s🚀 Starting coordinator node...\n", n.prefix)
 	n.Election.Start()
+	n.TokenRing.Start()
 }
 
+// Stop shuts down all modules.
 func (n *CoordinatorNode) Stop() {
 	n.mu.Lock()
 	n.alive = false
@@ -76,213 +91,148 @@ func (n *CoordinatorNode) Stop() {
 
 	fmt.Printf("%s🛑 Stopping coordinator node...\n", n.prefix)
 	n.Election.Stop()
-	n.LockMgr.Stop()
+	n.TokenRing.Stop()
+	n.RaftLog.Stop()
 }
 
-// StartTCP opens a TCP listener on n.Addr and handles incoming messages.
-func (n *CoordinatorNode) StartTCP() error {
+// ══════════════════════════════════════════════════════════════════════════════
+// net/rpc server — implements transport.RPCHandler
+// ══════════════════════════════════════════════════════════════════════════════
+
+// HandleVoteRequest dispatches an inbound RPC to the election module.
+func (n *CoordinatorNode) HandleVoteRequest(req types.VoteRequest) {
+	n.Election.VoteRequestCh <- req
+}
+
+// HandleVoteResponse dispatches an inbound RPC to the election module.
+func (n *CoordinatorNode) HandleVoteResponse(resp types.VoteResponse) {
+	n.Election.VoteResponseCh <- resp
+}
+
+// HandleHeartbeat dispatches an inbound RPC to the election module.
+func (n *CoordinatorNode) HandleHeartbeat(hb types.Heartbeat) {
+	n.Election.HeartbeatCh <- hb
+}
+
+// HandleAppendEntries dispatches an inbound RPC to the Raft log module.
+func (n *CoordinatorNode) HandleAppendEntries(req types.AppendEntriesRequest) {
+	n.RaftLog.HandleAppendEntries(req)
+}
+
+// HandleAppendEntriesResp dispatches an inbound RPC to the Raft log module.
+func (n *CoordinatorNode) HandleAppendEntriesResp(resp types.AppendEntriesResponse) {
+	n.RaftLog.AppendEntriesRespCh <- resp
+}
+
+// HandleTokenPass dispatches an inbound RPC to the token ring module.
+func (n *CoordinatorNode) HandleTokenPass(tok types.TokenMessage) {
+	n.TokenRing.TokenCh <- tok
+}
+
+// StartRPC opens a TCP listener and registers this node's RPC service.
+// Call this before Start() so peers can connect immediately.
+func (n *CoordinatorNode) StartRPC() error {
 	ln, err := net.Listen("tcp", n.Addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", n.Addr, err)
 	}
 	n.listener = ln
-	fmt.Printf("%s📡 TCP listener started on %s\n", n.prefix, n.Addr)
 
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				select {
-				case <-n.stopCh:
-					return
-				default:
-					fmt.Printf("%s⚠️  Accept error: %v\n", n.prefix, err)
-					continue
-				}
-			}
-			go n.handleConn(conn)
-		}
-	}()
+	svc := transport.NewNodeRPC(n) // n satisfies transport.RPCHandler
+	transport.StartRPCServer(ln, svc)
 
+	fmt.Printf("%s📡 RPC server started on %s\n", n.prefix, n.Addr)
 	return nil
 }
 
-func (n *CoordinatorNode) handleConn(conn net.Conn) {
-	defer conn.Close()
+// ══════════════════════════════════════════════════════════════════════════════
+// net/rpc client helpers
+// ══════════════════════════════════════════════════════════════════════════════
 
-	msg, err := transport.Receive(conn)
-	if err != nil {
-		fmt.Printf("%s⚠️  Receive error: %v\n", n.prefix, err)
-		return
+// rpcClient returns (or lazily creates) an RPCClient for the given peer.
+func (n *CoordinatorNode) rpcClient(peerID int) *transport.RPCClient {
+	if c, ok := n.rpcClients[peerID]; ok {
+		return c
 	}
-
-	// Re-marshal the generic payload so we can unmarshal into the concrete type.
-	payloadBytes, err := json.Marshal(msg.Payload)
-	if err != nil {
-		fmt.Printf("%s⚠️  Payload re-marshal error: %v\n", n.prefix, err)
-		return
-	}
-
-	switch msg.Type {
-	case types.MsgVoteRequest:
-		var req types.VoteRequest
-		json.Unmarshal(payloadBytes, &req)
-		n.Election.VoteRequestCh <- req
-
-	case types.MsgVoteResponse:
-		var resp types.VoteResponse
-		json.Unmarshal(payloadBytes, &resp)
-		n.Election.VoteResponseCh <- resp
-
-	case types.MsgHeartbeat:
-		var hb types.Heartbeat
-		json.Unmarshal(payloadBytes, &hb)
-		n.Election.HeartbeatCh <- hb
-
-	case types.MsgPrepareRequest:
-		var req types.PrepareRequest
-		json.Unmarshal(payloadBytes, &req)
-		n.TwoPCPart.HandlePrepare(req)
-
-	case types.MsgPrepareResponse:
-		var resp types.PrepareResponse
-		json.Unmarshal(payloadBytes, &resp)
-		n.TwoPCCoord.PrepareResponseCh <- resp
-
-	case types.MsgCommitRequest:
-		var req types.CommitRequest
-		json.Unmarshal(payloadBytes, &req)
-		n.TwoPCPart.HandleCommit(req)
-
-	case types.MsgAbortRequest:
-		var req types.AbortRequest
-		json.Unmarshal(payloadBytes, &req)
-		n.TwoPCPart.HandleAbort(req)
-
-	default:
-		fmt.Printf("%s⚠️  Unknown message type: %s\n", n.prefix, msg.Type)
-	}
-}
-
-// tcpSend is a helper that connects to a peer and sends a single message.
-func (n *CoordinatorNode) tcpSend(peerID int, msg types.Message) {
 	addr, ok := n.PeerAddrs[peerID]
 	if !ok {
 		fmt.Printf("%s⚠️  No address for peer %d\n", n.prefix, peerID)
-		return
+		return nil
 	}
-	conn, err := transport.ConnectWithRetry(addr, 3, 200*time.Millisecond)
-	if err != nil {
-		fmt.Printf("%s⚠️  Connect to peer %d (%s) failed: %v\n", n.prefix, peerID, addr, err)
-		return
-	}
-	defer conn.Close()
-	if err := transport.Send(conn, msg); err != nil {
-		fmt.Printf("%s⚠️  Send to peer %d failed: %v\n", n.prefix, peerID, err)
-	}
+	c := transport.NewRPCClient(addr, n.prefix)
+	n.rpcClients[peerID] = c
+	return c
 }
 
-// SetupTCPComm wires all OnSend* callbacks to use TCP transport.
-// Call this after creating nodes and before calling Start().
-func SetupTCPComm(nodes []*CoordinatorNode) {
+// ══════════════════════════════════════════════════════════════════════════════
+// SetupRPCComm — wire all OnSend* callbacks to make outbound net/rpc calls.
+// Call this after creating nodes and setting PeerAddrs, before calling Start().
+// ══════════════════════════════════════════════════════════════════════════════
+
+func SetupRPCComm(nodes []*CoordinatorNode) {
 	for _, node := range nodes {
 		n := node
 
+		// --- Raft Election callbacks (RPC) ---
+
 		n.Election.OnSendVoteReq = func(req types.VoteRequest) {
-			msg := types.Message{
-				Type:     types.MsgVoteRequest,
-				SenderID: n.ID,
-				Payload:  req,
-				Timestamp: time.Now(),
-			}
 			for peerID := range n.PeerAddrs {
-				n.tcpSend(peerID, msg)
+				c := n.rpcClient(peerID)
+				if c != nil {
+					go c.SendVoteRequest(req)
+				}
 			}
 		}
 
 		n.Election.OnSendVoteResp = func(targetID int, resp types.VoteResponse) {
-			msg := types.Message{
-				Type:     types.MsgVoteResponse,
-				SenderID: n.ID,
-				Payload:  resp,
-				Timestamp: time.Now(),
+			c := n.rpcClient(targetID)
+			if c != nil {
+				go c.SendVoteResponse(resp)
 			}
-			n.tcpSend(targetID, msg)
 		}
 
 		n.Election.OnSendHeartbeat = func(hb types.Heartbeat) {
-			msg := types.Message{
-				Type:     types.MsgHeartbeat,
-				SenderID: n.ID,
-				Payload:  hb,
-				Timestamp: time.Now(),
-			}
 			for peerID := range n.PeerAddrs {
-				n.tcpSend(peerID, msg)
+				c := n.rpcClient(peerID)
+				if c != nil {
+					go c.SendHeartbeat(hb)
+				}
 			}
 		}
 
-		n.TwoPCCoord.OnSendPrepare = func(participantID int, req types.PrepareRequest) {
-			msg := types.Message{
-				Type:     types.MsgPrepareRequest,
-				SenderID: n.ID,
-				Payload:  req,
-				Timestamp: time.Now(),
+		// --- Raft Log Replication callbacks (RPC) ---
+
+		n.RaftLog.OnSendAppendEntries = func(followerID int, req types.AppendEntriesRequest) {
+			c := n.rpcClient(followerID)
+			if c != nil {
+				go c.SendAppendEntries(req)
 			}
-			n.tcpSend(participantID, msg)
 		}
 
-		n.TwoPCCoord.OnSendCommit = func(participantID int, commitReq types.CommitRequest) {
-			msg := types.Message{
-				Type:     types.MsgCommitRequest,
-				SenderID: n.ID,
-				Payload:  commitReq,
-				Timestamp: time.Now(),
+		n.RaftLog.OnSendAppendEntriesResp = func(leaderID int, resp types.AppendEntriesResponse) {
+			c := n.rpcClient(leaderID)
+			if c != nil {
+				go c.SendAppendEntriesResp(resp)
 			}
-			n.tcpSend(participantID, msg)
 		}
 
-		n.TwoPCCoord.OnSendAbort = func(participantID int, abortReq types.AbortRequest) {
-			msg := types.Message{
-				Type:     types.MsgAbortRequest,
-				SenderID: n.ID,
-				Payload:  abortReq,
-				Timestamp: time.Now(),
-			}
-			n.tcpSend(participantID, msg)
-		}
+		// --- Token Ring callback (RPC) ---
 
-		n.TwoPCPart.OnSendVote = func(resp types.PrepareResponse) {
-			msg := types.Message{
-				Type:     types.MsgPrepareResponse,
-				SenderID: n.ID,
-				Payload:  resp,
-				Timestamp: time.Now(),
-			}
-			// Send back to all peers; only the leader's Coordinator will use it.
-			for peerID := range n.PeerAddrs {
-				n.tcpSend(peerID, msg)
+		n.TokenRing.OnPassToken = func(nextNodeID int, tok types.TokenMessage) {
+			c := n.rpcClient(nextNodeID)
+			if c != nil {
+				go c.SendToken(tok)
 			}
 		}
 	}
 }
 
-func (n *CoordinatorNode) IsAlive() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.alive
-}
+// ══════════════════════════════════════════════════════════════════════════════
+// In-process communication — for demos and testing (unchanged)
+// ══════════════════════════════════════════════════════════════════════════════
 
-func (n *CoordinatorNode) Kill() {
-	n.mu.Lock()
-	n.alive = false
-	n.mu.Unlock()
-	n.Election.Stop()
-	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
-	fmt.Printf("%s💀 NODE KILLED (simulating crash)\n", n.prefix)
-	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
-}
-
+// SetupInProcessComm wires all callbacks for in-process (channel-based)
+// communication. Use this for demos and testing instead of RPC.
 func SetupInProcessComm(nodes []*CoordinatorNode) {
 	for _, node := range nodes {
 		node.Peers = nodes
@@ -291,6 +241,7 @@ func SetupInProcessComm(nodes []*CoordinatorNode) {
 	for _, node := range nodes {
 		n := node
 
+		// --- Election callbacks (in-process) ---
 		n.Election.OnSendVoteReq = func(req types.VoteRequest) {
 			for _, peer := range nodes {
 				if peer.ID != n.ID && peer.IsAlive() {
@@ -315,63 +266,87 @@ func SetupInProcessComm(nodes []*CoordinatorNode) {
 			}
 		}
 
-		n.TwoPCCoord.OnSendPrepare = func(participantID int, req types.PrepareRequest) {
+		// --- Raft Log Replication callbacks (in-process) ---
+		n.RaftLog.OnSendAppendEntries = func(followerID int, req types.AppendEntriesRequest) {
 			for _, peer := range nodes {
-				if peer.ID == participantID && peer.IsAlive() {
-					peer.TwoPCPart.HandlePrepare(req)
+				if peer.ID == followerID && peer.IsAlive() {
+					peer.RaftLog.HandleAppendEntries(req)
 				}
 			}
 		}
 
-		n.TwoPCCoord.OnSendCommit = func(participantID int, commitReq types.CommitRequest) {
+		n.RaftLog.OnSendAppendEntriesResp = func(leaderID int, resp types.AppendEntriesResponse) {
 			for _, peer := range nodes {
-				if peer.ID == participantID && peer.IsAlive() {
-					peer.TwoPCPart.HandleCommit(commitReq)
+				if peer.ID == leaderID && peer.IsAlive() {
+					peer.RaftLog.AppendEntriesRespCh <- resp
 				}
 			}
 		}
 
-		n.TwoPCCoord.OnSendAbort = func(participantID int, abortReq types.AbortRequest) {
+		// --- Token Ring callback (in-process) ---
+		n.TokenRing.OnPassToken = func(nextNodeID int, tok types.TokenMessage) {
 			for _, peer := range nodes {
-				if peer.ID == participantID && peer.IsAlive() {
-					peer.TwoPCPart.HandleAbort(abortReq)
-				}
-			}
-		}
-
-		n.TwoPCPart.OnSendVote = func(resp types.PrepareResponse) {
-			for _, peer := range nodes {
-				if peer.Election.IsLeader() && peer.IsAlive() {
-					peer.TwoPCCoord.PrepareResponseCh <- resp
+				if peer.ID == nextNodeID && peer.IsAlive() {
+					peer.TokenRing.TokenCh <- tok
 				}
 			}
 		}
 	}
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Node lifecycle helpers
+// ══════════════════════════════════════════════════════════════════════════════
+
+// IsAlive returns whether this node is still running.
+func (n *CoordinatorNode) IsAlive() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.alive
+}
+
+// Kill simulates a node crash.
+func (n *CoordinatorNode) Kill() {
+	n.mu.Lock()
+	n.alive = false
+	n.mu.Unlock()
+	n.Election.Stop()
+	n.TokenRing.Stop()
+	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
+	fmt.Printf("%s💀 NODE KILLED (simulating crash)\n", n.prefix)
+	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Application-level operations
+// ══════════════════════════════════════════════════════════════════════════════
+
+// AcquireLock requests access to the critical section via the Token Ring algorithm.
 func (n *CoordinatorNode) AcquireLock(resource, requester string) types.LockResponse {
-	if !n.Election.IsLeader() {
-		return types.LockResponse{
-			Resource: resource,
-			Granted:  false,
-			Reason:   "this node is not the leader",
-		}
-	}
-	return n.LockMgr.Acquire(resource, requester)
+	return n.TokenRing.RequestAccess(resource, requester)
 }
 
+// ReleaseLock exits the critical section and passes the token to the next node.
+func (n *CoordinatorNode) ReleaseLock(resource, requester string) bool {
+	return n.TokenRing.ReleaseAccess(resource, requester)
+}
+
+// ProposeChange proposes a change via Raft Log Replication (in-process mode).
 func (n *CoordinatorNode) ProposeChange(txID string, change types.ChangeType, key, value string) bool {
 	if !n.Election.IsLeader() {
 		fmt.Printf("%s⚠️  Cannot propose change — not the leader\n", n.prefix)
 		return false
 	}
 
-	var participants []int
-	for _, peer := range n.Peers {
-		if peer.ID != n.ID && peer.IsAlive() {
-			participants = append(participants, peer.ID)
-		}
+	return n.RaftLog.ProposeEntry(change, key, value)
+}
+
+// ProposeChangeRPC proposes a change via Raft Log Replication (RPC mode).
+func (n *CoordinatorNode) ProposeChangeRPC(txID string, change types.ChangeType, key, value string) bool {
+	if !n.Election.IsLeader() {
+		fmt.Printf("%s⚠️  Cannot propose change — not the leader\n", n.prefix)
+		return false
 	}
 
-	return n.TwoPCCoord.Propose(txID, change, key, value, participants)
+	return n.RaftLog.ProposeEntry(change, key, value)
 }

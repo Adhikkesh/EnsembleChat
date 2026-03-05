@@ -9,167 +9,294 @@ import (
 )
 
 const (
-	DefaultLeaseDuration = 10 * time.Second
-	LeaseCleanupInterval = 1 * time.Second
+	// TokenIdlePassInterval controls how often an idle token holder
+	// automatically passes the token to the next node in the ring.
+	TokenIdlePassInterval = 200 * time.Millisecond
 )
 
-type Lease struct {
-	Resource  string    `json:"resource"`
-	Holder    string    `json:"holder"`
-	GrantedAt time.Time `json:"granted_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Duration  time.Duration `json:"duration"`
-}
-
-func (l *Lease) IsExpired() bool {
-	return time.Now().After(l.ExpiresAt)
-}
-
-type LockManager struct {
+// TokenRingManager implements mutual exclusion using the Token Ring algorithm.
+//
+// Algorithm Overview:
+//   - Nodes are arranged in a logical ring (e.g., Node 0 → Node 1 → Node 2 → Node 0).
+//   - A single token circulates around the ring.
+//   - Only the node currently holding the token can enter the critical section.
+//   - After exiting the critical section, the token is passed to the next node.
+//   - If a node doesn't need the critical section, it passes the token along
+//     after a short idle interval.
+//
+// Properties:
+//   - Mutual Exclusion: Only one node can be in the critical section at a time.
+//   - Fairness: Every node eventually receives the token (starvation-free).
+//   - No deadlock: The token always circulates.
+type TokenRingManager struct {
 	mu     sync.Mutex
 	nodeID int
 	prefix string
 
-	leases map[string]*Lease
+	// Ring topology
+	ringOrder []int // ordered node IDs forming the ring
+	ringIndex int   // this node's position in ringOrder
 
-	leaseDuration time.Duration
+	// Token state
+	hasToken bool
+	seqNum   int
+
+	// Critical section state
+	inCS       bool
+	csHolder   string // who holds the CS currently
+	csResource string // which resource
+
+	// Waiting requests queue
+	waitQueue []csRequest
+
+	// Channel to receive token from predecessor in the ring
+	TokenCh chan types.TokenMessage
+
+	// Callback to pass token to successor in the ring
+	OnPassToken func(nextNodeID int, tok types.TokenMessage)
 
 	stopCh chan struct{}
 }
 
-func NewLockManager(nodeID int, leaseDuration time.Duration) *LockManager {
-	if leaseDuration <= 0 {
-		leaseDuration = DefaultLeaseDuration
-	}
-	return &LockManager{
-		nodeID:        nodeID,
-		prefix:        types.LogPrefix(nodeID, "LOCK"),
-		leases:        make(map[string]*Lease),
-		leaseDuration: leaseDuration,
-		stopCh:        make(chan struct{}),
-	}
+// csRequest represents a pending request to enter the critical section.
+type csRequest struct {
+	resource   string
+	requester  string
+	responseCh chan types.LockResponse
 }
 
-func (lm *LockManager) Start() {
-	go lm.cleanupLoop()
-	fmt.Printf("%s🔓 Lock manager started (lease TTL: %v)\n", lm.prefix, lm.leaseDuration)
-}
-
-func (lm *LockManager) Stop() {
-	close(lm.stopCh)
-}
-
-func (lm *LockManager) Acquire(resource, requester string) types.LockResponse {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	now := time.Now()
-
-	if existing, ok := lm.leases[resource]; ok {
-		if !existing.IsExpired() {
-			fmt.Printf("%s🚫 DENIED lock on \"%s\" to [%s] — held by [%s] until %s\n",
-				lm.prefix, resource, requester, existing.Holder,
-				existing.ExpiresAt.Format("15:04:05.000"))
-			return types.LockResponse{
-				Resource: resource,
-				Granted:  false,
-				Holder:   existing.Holder,
-				ExpiresAt: existing.ExpiresAt,
-				Reason:   fmt.Sprintf("resource locked by %s until %s", existing.Holder, existing.ExpiresAt.Format("15:04:05")),
-			}
-		}
-		fmt.Printf("%s⏰ Previous lease on \"%s\" by [%s] has expired. Revoking.\n",
-			lm.prefix, resource, existing.Holder)
-		delete(lm.leases, resource)
-	}
-
-	lease := &Lease{
-		Resource:  resource,
-		Holder:    requester,
-		GrantedAt: now,
-		ExpiresAt: now.Add(lm.leaseDuration),
-		Duration:  lm.leaseDuration,
-	}
-	lm.leases[resource] = lease
-
-	fmt.Printf("%s✅ GRANTED lock on \"%s\" to [%s] (expires: %s)\n",
-		lm.prefix, resource, requester,
-		lease.ExpiresAt.Format("15:04:05.000"))
-
-	return types.LockResponse{
-		Resource:  resource,
-		Granted:   true,
-		Holder:    requester,
-		ExpiresAt: lease.ExpiresAt,
-		Reason:    "lock acquired successfully",
-	}
-}
-
-func (lm *LockManager) Release(resource, requester string) bool {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	lease, ok := lm.leases[resource]
-	if !ok {
-		fmt.Printf("%s⚠️  Cannot release \"%s\" — no active lease\n",
-			lm.prefix, resource)
-		return false
-	}
-
-	if lease.Holder != requester {
-		fmt.Printf("%s⚠️  Cannot release \"%s\" — held by [%s], not [%s]\n",
-			lm.prefix, resource, lease.Holder, requester)
-		return false
-	}
-
-	delete(lm.leases, resource)
-	fmt.Printf("%s🔓 Released lock on \"%s\" by [%s]\n",
-		lm.prefix, resource, requester)
-	return true
-}
-
-func (lm *LockManager) GetLease(resource string) *Lease {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-	return lm.leases[resource]
-}
-
-func (lm *LockManager) GetAllLeases() map[string]*Lease {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	result := make(map[string]*Lease)
-	for k, v := range lm.leases {
-		if !v.IsExpired() {
-			result[k] = v
+// NewTokenRingManager creates a new Token Ring mutual exclusion manager.
+// ringOrder defines the logical ring. initialHolder is the node that starts with the token.
+func NewTokenRingManager(nodeID int, ringOrder []int, initialHolder int) *TokenRingManager {
+	idx := -1
+	for i, id := range ringOrder {
+		if id == nodeID {
+			idx = i
+			break
 		}
 	}
-	return result
+
+	return &TokenRingManager{
+		nodeID:    nodeID,
+		prefix:    types.LogPrefix(nodeID, "TOKEN-RING"),
+		ringOrder: ringOrder,
+		ringIndex: idx,
+		hasToken:  nodeID == initialHolder,
+		seqNum:    0,
+		waitQueue: make([]csRequest, 0),
+		TokenCh:   make(chan types.TokenMessage, 10),
+		stopCh:    make(chan struct{}),
+	}
 }
 
-func (lm *LockManager) cleanupLoop() {
-	ticker := time.NewTicker(LeaseCleanupInterval)
+// Start begins the token ring processing loop.
+func (t *TokenRingManager) Start() {
+	go t.run()
+	if t.hasToken {
+		fmt.Printf("%s🪙 Token Ring started — THIS NODE holds the initial token (ring: %v)\n",
+			t.prefix, t.ringOrder)
+	} else {
+		fmt.Printf("%s🔄 Token Ring started — waiting for token (ring: %v)\n",
+			t.prefix, t.ringOrder)
+	}
+}
+
+// Stop terminates the token ring processing loop.
+func (t *TokenRingManager) Stop() {
+	select {
+	case <-t.stopCh:
+	default:
+		close(t.stopCh)
+	}
+}
+
+// run is the main event loop: receive tokens, grant waiting requests, or pass along.
+func (t *TokenRingManager) run() {
+	ticker := time.NewTicker(TokenIdlePassInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-lm.stopCh:
+		case <-t.stopCh:
 			return
+		case tok := <-t.TokenCh:
+			t.handleTokenReceive(tok)
 		case <-ticker.C:
-			lm.cleanupExpired()
+			t.idlePass()
 		}
 	}
 }
 
-func (lm *LockManager) cleanupExpired() {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+// handleTokenReceive is called when this node receives the token from its predecessor.
+func (t *TokenRingManager) handleTokenReceive(tok types.TokenMessage) {
+	t.mu.Lock()
+	t.hasToken = true
+	t.seqNum = tok.SeqNum
+	fmt.Printf("%s🪙 ← Received token (seq: %d) from predecessor\n", t.prefix, tok.SeqNum)
 
-	for resource, lease := range lm.leases {
-		if lease.IsExpired() {
-			fmt.Printf("%s⏰ Auto-expired lease on \"%s\" (was held by [%s])\n",
-				lm.prefix, resource, lease.Holder)
-			delete(lm.leases, resource)
+	if len(t.waitQueue) > 0 {
+		// Grant access to the first waiting request
+		req := t.waitQueue[0]
+		t.waitQueue = t.waitQueue[1:]
+
+		t.inCS = true
+		t.csHolder = req.requester
+		t.csResource = req.resource
+
+		fmt.Printf("%s🪙 ✅ GRANTED critical section to [%s] for resource \"%s\"\n",
+			t.prefix, req.requester, req.resource)
+
+		t.mu.Unlock()
+
+		req.responseCh <- types.LockResponse{
+			Resource: req.resource,
+			Granted:  true,
+			Holder:   req.requester,
+			Reason:   "token acquired — critical section granted",
+		}
+		return
+	}
+
+	// No one waiting, will be passed along by idlePass ticker
+	t.mu.Unlock()
+}
+
+// idlePass passes the token to the next node if idle (not in CS, no waiting requests).
+func (t *TokenRingManager) idlePass() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.hasToken && !t.inCS && len(t.waitQueue) == 0 {
+		t.passTokenLocked()
+	}
+}
+
+// passTokenLocked passes the token to the next node in the ring. Caller must hold t.mu.
+func (t *TokenRingManager) passTokenLocked() {
+	nextIdx := (t.ringIndex + 1) % len(t.ringOrder)
+	nextNode := t.ringOrder[nextIdx]
+
+	t.seqNum++
+	tok := types.TokenMessage{
+		SeqNum: t.seqNum,
+	}
+
+	t.hasToken = false
+	fmt.Printf("%s🪙 → Passing token (seq: %d) to Node %d\n",
+		t.prefix, tok.SeqNum, nextNode)
+
+	if t.OnPassToken != nil {
+		go t.OnPassToken(nextNode, tok)
+	}
+}
+
+// RequestAccess requests to enter the critical section for a given resource.
+// Blocks until the token is held and access is granted.
+func (t *TokenRingManager) RequestAccess(resource, requester string) types.LockResponse {
+	t.mu.Lock()
+
+	// If we already have the token and no one is in CS, grant immediately
+	if t.hasToken && !t.inCS {
+		t.inCS = true
+		t.csHolder = requester
+		t.csResource = resource
+
+		fmt.Printf("%s🪙 ✅ GRANTED critical section immediately to [%s] for \"%s\" (token already held)\n",
+			t.prefix, requester, resource)
+
+		t.mu.Unlock()
+		return types.LockResponse{
+			Resource: resource,
+			Granted:  true,
+			Holder:   requester,
+			Reason:   "token already held — access granted immediately",
 		}
 	}
+
+	// Queue the request and wait for the token
+	responseCh := make(chan types.LockResponse, 1)
+	t.waitQueue = append(t.waitQueue, csRequest{
+		resource:   resource,
+		requester:  requester,
+		responseCh: responseCh,
+	})
+
+	fmt.Printf("%s🪙 ⏳ [%s] queued for critical section on \"%s\" (waiting for token...)\n",
+		t.prefix, requester, resource)
+
+	t.mu.Unlock()
+
+	// Block until granted
+	return <-responseCh
+}
+
+// ReleaseAccess exits the critical section and passes the token to the next node.
+func (t *TokenRingManager) ReleaseAccess(resource, requester string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !t.inCS {
+		fmt.Printf("%s⚠️ Cannot release — not in critical section\n", t.prefix)
+		return false
+	}
+
+	if t.csHolder != requester {
+		fmt.Printf("%s⚠️ Cannot release — held by [%s], not [%s]\n",
+			t.prefix, t.csHolder, requester)
+		return false
+	}
+
+	fmt.Printf("%s🪙 🔓 [%s] exited critical section for \"%s\"\n",
+		t.prefix, requester, resource)
+
+	t.inCS = false
+	t.csHolder = ""
+	t.csResource = ""
+
+	// Check if there's another waiting request on this same node
+	if len(t.waitQueue) > 0 {
+		req := t.waitQueue[0]
+		t.waitQueue = t.waitQueue[1:]
+
+		t.inCS = true
+		t.csHolder = req.requester
+		t.csResource = req.resource
+
+		fmt.Printf("%s🪙 ✅ GRANTED critical section to next queued: [%s] for \"%s\"\n",
+			t.prefix, req.requester, req.resource)
+
+		go func() {
+			req.responseCh <- types.LockResponse{
+				Resource: req.resource,
+				Granted:  true,
+				Holder:   req.requester,
+				Reason:   "token acquired — critical section granted",
+			}
+		}()
+		return true
+	}
+
+	// Nobody waiting locally, pass token to next node in the ring
+	t.passTokenLocked()
+	return true
+}
+
+// HasToken returns whether this node currently holds the token.
+func (t *TokenRingManager) HasToken() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.hasToken
+}
+
+// GetStatus returns the current token ring status for this node.
+func (t *TokenRingManager) GetStatus() (hasToken bool, inCS bool, resource string, holder string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.hasToken, t.inCS, t.csResource, t.csHolder
+}
+
+// GetNextNode returns the ID of the next node in the ring.
+func (t *TokenRingManager) GetNextNode() int {
+	nextIdx := (t.ringIndex + 1) % len(t.ringOrder)
+	return t.ringOrder[nextIdx]
 }

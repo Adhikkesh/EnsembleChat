@@ -26,20 +26,19 @@ func LogPrefix(nodeID int, role string) string {
 type MessageType string
 
 const (
+	// Raft Leader Election
 	MsgVoteRequest  MessageType = "VOTE_REQUEST"
 	MsgVoteResponse MessageType = "VOTE_RESPONSE"
 	MsgHeartbeat    MessageType = "HEARTBEAT"
 
-	MsgPrepareRequest  MessageType = "PREPARE_REQUEST"
-	MsgPrepareResponse MessageType = "PREPARE_RESPONSE"
-	MsgCommitRequest   MessageType = "COMMIT_REQUEST"
-	MsgAbortRequest    MessageType = "ABORT_REQUEST"
-	MsgCommitAck       MessageType = "COMMIT_ACK"
+	// Raft Log Replication (Consensus)
+	MsgAppendEntries     MessageType = "APPEND_ENTRIES"
+	MsgAppendEntriesResp MessageType = "APPEND_ENTRIES_RESP"
 
-	MsgLockRequest  MessageType = "LOCK_REQUEST"
-	MsgLockResponse MessageType = "LOCK_RESPONSE"
-	MsgLockRelease  MessageType = "LOCK_RELEASE"
+	// Token Ring (Mutual Exclusion)
+	MsgTokenPass MessageType = "TOKEN_PASS"
 
+	// Application-level messages
 	MsgRegisterServer MessageType = "REGISTER_SERVER"
 	MsgCreateRoom     MessageType = "CREATE_ROOM"
 	MsgChatMessage    MessageType = "CHAT_MESSAGE"
@@ -52,6 +51,8 @@ type Message struct {
 	Payload   interface{} `json:"payload"`
 	Timestamp time.Time   `json:"timestamp"`
 }
+
+// === Node States (Raft) ===
 
 type NodeState int
 
@@ -74,6 +75,8 @@ func (s NodeState) String() string {
 	}
 }
 
+// === Raft Leader Election Types ===
+
 type VoteRequest struct {
 	Term        int `json:"term"`
 	CandidateID int `json:"candidate_id"`
@@ -90,6 +93,8 @@ type Heartbeat struct {
 	LeaderID int `json:"leader_id"`
 }
 
+// === Raft Log Replication Types (Consensus) ===
+
 type ChangeType string
 
 const (
@@ -97,40 +102,46 @@ const (
 	ChangeAddRoom   ChangeType = "ADD_ROOM"
 )
 
-type PrepareRequest struct {
-	TransactionID string     `json:"transaction_id"`
-	Change        ChangeType `json:"change_type"`
-	Key           string     `json:"key"`
-	Value         string     `json:"value"`
+type LogEntry struct {
+	Term   int        `json:"term"`
+	Index  int        `json:"index"`
+	Change ChangeType `json:"change_type"`
+	Key    string     `json:"key"`
+	Value  string     `json:"value"`
 }
 
-type PrepareResponse struct {
-	TransactionID string `json:"transaction_id"`
-	VoteCommit    bool   `json:"vote_commit"`
-	ParticipantID int    `json:"participant_id"`
+type AppendEntriesRequest struct {
+	Term         int        `json:"term"`
+	LeaderID     int        `json:"leader_id"`
+	PrevLogIndex int        `json:"prev_log_index"`
+	PrevLogTerm  int        `json:"prev_log_term"`
+	Entries      []LogEntry `json:"entries"`
+	LeaderCommit int        `json:"leader_commit"`
 }
 
-type CommitRequest struct {
-	TransactionID string `json:"transaction_id"`
+type AppendEntriesResponse struct {
+	Term       int  `json:"term"`
+	Success    bool `json:"success"`
+	FollowerID int  `json:"follower_id"`
+	MatchIndex int  `json:"match_index"`
 }
 
-type AbortRequest struct {
-	TransactionID string `json:"transaction_id"`
-	Reason        string `json:"reason"`
+// === Token Ring Types (Mutual Exclusion) ===
+
+type TokenMessage struct {
+	SeqNum int `json:"seq_num"`
 }
 
-type LockRequest struct {
-	Resource  string `json:"resource"`
-	Requester string `json:"requester"`
-}
+// === Lock Response (external API for critical section access) ===
 
 type LockResponse struct {
-	Resource    string    `json:"resource"`
-	Granted     bool      `json:"granted"`
-	Holder      string    `json:"holder"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	Reason      string    `json:"reason"`
+	Resource string `json:"resource"`
+	Granted  bool   `json:"granted"`
+	Holder   string `json:"holder"`
+	Reason   string `json:"reason"`
 }
+
+// === Routing Types ===
 
 type RoutingEntry struct {
 	RoomName   string    `json:"room_name"`

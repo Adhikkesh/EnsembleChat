@@ -1,221 +1,380 @@
-# ZooKeeper-Inspired Distributed Chat Server Coordination System
+# Distributed Chat Server Coordination System
 
-A Go-based distributed coordination system implementing three fundamental distributed systems algorithms: **Leader Election (Simplified Raft)**, **Lease-Based Distributed Locking**, and **Two-Phase Commit (2PC)** — applied to a globally distributed chat routing system.
+A Go-based distributed coordination system implementing three fundamental distributed systems algorithms - **Raft Leader Election**, **Token Ring Mutual Exclusion**, and **Raft Log Replication** - applied to a distributed chat routing system. All inter-node communication uses Go's native **`net/rpc`** over TCP.
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        SYSTEM ARCHITECTURE                             │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐       LAYER 1: CLIENTS       │
-│  │ Client A │  │ Client B │  │ Client C │       (End Users)             │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘                              │
-│       │              │              │                                    │
-│  ─────┼──────────────┼──────────────┼────────────────────────────────── │
-│       │              │              │                                    │
-│  ┌────▼─────┐  ┌─────▼────┐  ┌─────▼────┐  LAYER 2: CHAT SERVERS      │
-│  │ Server 1 │  │ Server 2 │  │ Server 3 │  (Stateless Workers)         │
-│  │ :9001    │  │ :9002    │  │ :9003    │                              │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘                              │
-│       │              │              │                                    │
-│  ─────┼──────────────┼──────────────┼────────────────────────────────── │
-│       │              │              │                                    │
-│  ┌────▼──────────────▼──────────────▼────┐  LAYER 3: COORDINATION      │
-│  │        COORDINATION ENSEMBLE          │  ENSEMBLE (ZK Nodes)        │
-│  │                                        │                              │
-│  │  ┌──────────┐ ┌──────────┐ ┌────────┐ │                              │
-│  │  │  Node 0  │ │  Node 1  │ │ Node 2 │ │  3 Coordinator Nodes       │
-│  │  │ (LEADER) │ │(FOLLOWER)│ │(FOLLOW)│ │                              │
-│  │  │          │ │          │ │        │ │  ┌──────────────────────┐   │
-│  │  │ • Election│ │ • Election│ │• Elect │ │  │ Replicated State:    │   │
-│  │  │ • Locks   │ │ • 2PC Part│ │• 2PC  │ │  │  • Routing Table     │   │
-│  │  │ • 2PC Coord│ │          │ │       │ │  │  • Server Registry   │   │
-│  │  └──────────┘ └──────────┘ └────────┘ │  │  • Room Mappings     │   │
-│  │                                        │  └──────────────────────┘   │
-│  └────────────────────────────────────────┘                              │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+---
 
 ## Algorithms Implemented
 
-### 1. Leader Election — Simplified Raft Protocol
+### 1. Raft Leader Election
 **File:** `internal/election/election.go`
 
 | Concept | Implementation |
 |---------|---------------|
-| State Machine | Follower → Candidate → Leader |
+| State Machine | Follower -> Candidate -> Leader |
 | Failure Detection | Randomized heartbeat timeouts (300-500ms) |
-| Voting | Term-based, first-come-first-served |
+| Voting | Term-based, first-come-first-served, majority quorum |
 | Recovery | Automatic re-election on leader crash |
 
-**Flow:**
 ```
-Follower ──(timeout)──► Candidate ──(majority vote)──► Leader
-    ▲                       │                              │
-    │                       ├──(higher term seen)──────────┘
-    │                       │                      (sends heartbeats)
-    └──(heartbeat received)─┘
+Follower --(timeout)--> Candidate --(majority vote)--> Leader
+    ^                       |                              |
+    |                       +---(higher term seen)---------+
+    |                       |                       (sends heartbeats)
+    +---(heartbeat rcvd)----+
 ```
 
-### 2. Mutual Exclusion — Lease-Based Distributed Locking
+### 2. Token Ring Mutual Exclusion
 **File:** `internal/lock/lock.go`
 
 | Concept | Implementation |
 |---------|---------------|
-| Lock Type | Time-bound leases (configurable TTL) |
-| Deadlock Prevention | Automatic lease expiry on holder crash |
-| Ownership | Only the holder can release a lock |
-| Contention | Immediate rejection if resource is locked |
+| Topology | Logical ring: Node 0 -> Node 1 -> Node 2 -> Node 0 |
+| Token | Single token circulates; only the holder enters the critical section |
+| Fairness | Every node eventually receives the token (starvation-free) |
+| No Deadlock | Token always circulates, even when idle |
 
-**Flow:**
 ```
-Server A ──► AcquireLock("General_Chat") ──► GRANTED (lease 10s)
-Server B ──► AcquireLock("General_Chat") ──► DENIED (held by Server A)
-             ... Server A releases or lease expires ...
-Server B ──► AcquireLock("General_Chat") ──► GRANTED
+        +------ Node 0 <------+
+        |      (token?)        |
+        v                      |
+     Node 1 -------> Node 2 --+
 ```
 
-### 3. Consensus — Two-Phase Commit (2PC)
+### 3. Raft Log Replication (Consensus)
 **File:** `internal/consensus/consensus.go`
 
 | Concept | Implementation |
 |---------|---------------|
-| Phase 1 | Leader sends PREPARE → Participants vote COMMIT/ABORT |
-| Phase 2a | All COMMIT → Leader sends COMMIT → All apply change |
-| Phase 2b | Any ABORT → Leader sends ABORT → No changes applied |
-| Timeout | Unresponsive participants trigger ABORT (3s timeout) |
+| Leader appends | Entry added to leader's log |
+| AppendEntries RPC | Sent to all followers in parallel |
+| Majority commit | Entry committed once 2/3 nodes replicate it |
+| State machine | Committed entries applied to the routing table |
+| Safety | Log Matching, Leader Completeness (Raft sec 5.3) |
 
-**Flow:**
 ```
-Leader (Coordinator)          Follower 1 (Participant)    Follower 2 (Participant)
-       │                              │                           │
-       ├──── PREPARE ────────────────►│                           │
-       ├──── PREPARE ──────────────────────────────────────────►│
-       │                              │                           │
-       │◄──── VOTE_COMMIT ───────────┤                           │
-       │◄──── VOTE_COMMIT ────────────────────────────────────── │
-       │                              │                           │
-       ├──── COMMIT ─────────────────►│                           │
-       ├──── COMMIT ───────────────────────────────────────────►│
-       │                              │                           │
-   [Applied]                      [Applied]                   [Applied]
+Leader           Follower 1        Follower 2
+  |                  |                  |
+  +--AppendEntries-->|                  |
+  +--AppendEntries------------------------->|
+  |                  |                  |
+  |<--- ACK --------|                  |
+  |<--- ACK --------------------------------|
+  |                  |                  |
+  |  (majority = 2/3 -> COMMITTED)     |
+  |                  |                  |
+  +--AppendEntries-->|  (commit index)  |
+  +--AppendEntries------------------------->|
 ```
+
+---
 
 ## Project Structure
 
 ```
-├── go.mod                              # Go module definition
-├── README.md                           # This file
-├── internal/
-│   ├── types/types.go                  # Shared types, enums, message definitions
-│   ├── transport/transport.go          # JSON-over-TCP networking layer
-│   ├── election/election.go            # Algorithm 1: Simplified Raft Election
-│   ├── lock/lock.go                    # Algorithm 2: Lease-Based Locking
-│   ├── consensus/consensus.go          # Algorithm 3: Two-Phase Commit
-│   ├── coordinator/coordinator.go      # Coordination ensemble node
-│   ├── chatserver/chatserver.go        # Chat server worker node
-│   └── client/client.go               # Chat client
-├── cmd/
-│   ├── coordinator/main.go             # Coordinator node launcher
-│   ├── chatserver/main.go              # Chat server launcher
-│   └── client/main.go                  # Client launcher
-└── demo/
-    ├── demo_leader_failure/main.go     # Election & failure recovery demo
-    ├── demo_mutual_exclusion/main.go   # Lock contention demo
-    └── demo_consensus/main.go          # 2PC state replication demo
++-- go.mod
++-- README.md
++-- internal/
+|   +-- types/types.go                  # Shared types & message definitions
+|   +-- transport/transport.go          # net/rpc service, server & client
+|   +-- election/election.go            # Algorithm 1: Raft Leader Election
+|   +-- lock/lock.go                    # Algorithm 2: Token Ring Mutual Exclusion
+|   +-- consensus/consensus.go          # Algorithm 3: Raft Log Replication
+|   +-- coordinator/coordinator.go      # Coordination ensemble node
+|   +-- chatserver/chatserver.go        # Chat server (rooms, messages)
+|   +-- client/client.go               # Chat client
++-- cmd/
+|   +-- coordinator/main.go             # Coordinator CLI (multi-process RPC)
+|   +-- chatserver/main.go              # Chat server launcher
+|   +-- client/main.go                  # Client launcher
++-- demo/
+|   +-- demo_full_chat/main.go          # * Full end-to-end chat demo (all 3 algos)
+|   +-- demo_multi_node_rpc/main.go     # * Multi-node RPC over TCP demo
+|   +-- demo_leader_failure/main.go     # Election & failure recovery demo
+|   +-- demo_mutual_exclusion/main.go   # Token Ring contention demo
+|   +-- demo_consensus/main.go          # Raft Log Replication demo
++-- scripts/
+    +-- launch_cluster.ps1              # Launch 3-node cluster (Windows)
+    +-- launch_cluster.sh               # Launch 3-node cluster (Linux/Mac)
 ```
+
+---
 
 ## Quick Start
 
 ### Prerequisites
-- Go 1.21+ installed ([download](https://go.dev/dl/))
+- **Go 1.21+** installed (https://go.dev/dl/)
 
-### Run the Demos
-
-Each demo is a self-contained script that simulates a specific distributed algorithm:
-
+### Build
 ```bash
-# Demo 1: Leader Election & Failure Recovery
-# Shows: 3 nodes elect a leader → leader is killed → new leader elected
-go run ./demo/demo_leader_failure/
-
-# Demo 2: Mutual Exclusion (Lease-Based Locking)
-# Shows: 2 servers race for same lock → one wins, one denied → release → retry
-go run ./demo/demo_mutual_exclusion/
-
-# Demo 3: Consensus (Two-Phase Commit)
-# Shows: Leader proposes change → all nodes vote → committed → state replicated
-go run ./demo/demo_consensus/
+go build ./...
 ```
 
-### Run Individual Components
+### Run the Demos (Single Machine)
 
 ```bash
-# Start a coordinator node
-go run ./cmd/coordinator/ -id=0 -addr=:7000
+# * RECOMMENDED: Full end-to-end chat demo (all 3 algorithms + chat operations)
+go run ./demo/demo_full_chat/
 
-# Start a chat server
-go run ./cmd/chatserver/ -id=server1 -addr=:9001
+# * Multi-node RPC demo (3 nodes on separate TCP ports, real net/rpc)
+go run ./demo/demo_multi_node_rpc/
 
-# Start a client
-go run ./cmd/client/ -id=alice
+# Individual algorithm demos:
+go run ./demo/demo_leader_failure/       # Raft election + leader crash recovery
+go run ./demo/demo_mutual_exclusion/     # Token Ring mutual exclusion
+go run ./demo/demo_consensus/            # Raft Log Replication consensus
 ```
 
-## Real-World System Mapping
+### Interactive CLI (Multi-Process on Same Machine)
 
-This project maps directly to production distributed systems used at global scale:
+```bash
+# Terminal 1 - Node 0
+go run ./cmd/coordinator/ -id=0 -addr=:7000 -peers="1=127.0.0.1:7001,2=127.0.0.1:7002"
 
-| Our System | ZooKeeper / etcd | WhatsApp / Discord |
-|-----------|-----------------|-------------------|
-| Coordination Ensemble | ZooKeeper ensemble (3-5 nodes) | Not directly exposed, but similar internal coordination |
-| Leader Election (Raft) | ZAB protocol (ZooKeeper), Raft (etcd) | Used internally for partition leadership |
-| Lease-Based Locking | Ephemeral nodes + session timeouts (ZK), Lease API (etcd) | Room creation locks, user session management |
-| Two-Phase Commit | Atomic broadcast (ZAB), Raft log replication | Message delivery guarantees, group membership changes |
-| Chat Servers | Application servers (stateless workers) | Chat server fleet (~1000s of servers) |
-| Routing Table | `/services/routing` znode tree | Consistent hashing ring for user→server mapping |
-| Heartbeat Detection | Session keepalive, leader pings | Server health monitoring, connection liveness |
+# Terminal 2 - Node 1
+go run ./cmd/coordinator/ -id=1 -addr=:7001 -peers="0=127.0.0.1:7000,2=127.0.0.1:7002"
 
-### Detailed Mappings
+# Terminal 3 - Node 2
+go run ./cmd/coordinator/ -id=2 -addr=:7002 -peers="0=127.0.0.1:7000,1=127.0.0.1:7001"
+```
 
-**ZooKeeper:**
-- Our `ElectionNode` → ZooKeeper's ZAB leader election. ZK uses a similar term-based protocol to elect a single leader among ensemble nodes.
-- Our `LockManager` → ZooKeeper's recipe for distributed locks using ephemeral sequential znodes. Our lease TTL maps to ZK's session timeout.
-- Our `Coordinator.Propose()` → ZooKeeper's atomic broadcast. When a client writes to ZK, the leader broadcasts to followers and waits for majority acknowledgment.
+Or use the script:
+```powershell
+.\scripts\launch_cluster.ps1    # Windows - opens 3 PowerShell windows
+```
 
-**etcd / Kubernetes:**
-- Our Raft election → etcd uses the full Raft protocol. Our simplified version omits log replication but captures the core election mechanics.
-- Our lease-based locks → etcd's `Lease` API, used by Kubernetes for leader election among controller-manager pods. The TTL prevents split-brain when a pod crashes.
-- Our 2PC → etcd's Raft log replication ensures all nodes agree on the same sequence of operations.
+### CLI Commands (on any running coordinator)
 
-**WhatsApp at Scale:**
-- Our chat servers → WhatsApp runs ~1000+ Erlang servers, each handling a subset of conversations.
-- Our routing table → WhatsApp uses consistent hashing to map phone numbers to servers. Our coordinator ensemble serves a similar purpose.
-- Our lock mechanism → When creating a group chat, WhatsApp must ensure no two servers create the same group simultaneously — analogous to our lease-based locking.
-
-## Design Decisions
-
-1. **In-Process Communication for Demos:** Demos use direct Go channel communication instead of TCP to keep them self-contained and easy to run. The production `cmd/` launchers use the TCP transport layer.
-
-2. **Simplified Raft:** We omit log replication (handled separately by 2PC) and log-based vote comparison for clarity. The election mechanics (terms, timeouts, voting) are preserved.
-
-3. **Lease-Based Locking vs. Queue-Based:** We chose leases over a queue-based approach because leases inherently handle holder crashes via TTL expiry, making the system more resilient.
-
-4. **2PC vs. Raft Log Replication:** While production systems like etcd replicate state via Raft logs, we use 2PC to demonstrate a distinct consensus algorithm and emphasize the prepare/commit/abort phases.
-
-## Terminal Output
-
-All demos produce color-coded, timestamped terminal output with emoji prefixes for easy visual tracking:
-
-- 🟢 `[Node X | ELECTION]` — Election events
-- 🔵 `[Node X | LOCK]` — Lock operations
-- 🟣 `[Node X | 2PC-COORD]` — 2PC coordinator events
-- 🟡 `[Node X | 2PC-PART]` — 2PC participant events
-- 👑 — Leader election wins
-- ❌ — Denials, aborts, failures
-- ✅ — Grants, commits, successes
+| Command | Description |
+|---------|-------------|
+| `status` | Show election state (LEADER/FOLLOWER), term, leader ID |
+| `lock <resource> <requester>` | Enter critical section via Token Ring |
+| `unlock <resource> <requester>` | Exit critical section, pass token |
+| `token` | Show token ring status (held/circulating) |
+| `propose <txID> add_room <name> <server>` | Replicate room creation via Raft |
+| `propose <txID> add_server <name> <addr>` | Replicate server registration via Raft |
+| `state` | Show routing table & Raft log |
+| `help` | Show all commands |
+| `quit` | Shutdown node |
 
 ---
 
-*Built for DS Case Study — Distributed Systems, Semester 6*
+## Running on Multiple Laptops (Multi-Machine Setup)
+
+This is the key demo for demonstrating real distributed communication across physical machines.
+
+### Step 0: Prerequisites (all laptops)
+
+1. **Go 1.21+** installed on all laptops
+2. All connected to the **same WiFi / LAN network**
+3. Copy the project folder to all laptops
+4. Find each laptop's IP address:
+
+```powershell
+# Windows
+ipconfig    # Look for "IPv4 Address" under your WiFi adapter
+```
+```bash
+# Linux/Mac
+ip addr     # or: ifconfig
+```
+
+**Example IPs (replace with yours):**
+- **Laptop A** = `192.168.1.100`
+- **Laptop B** = `192.168.1.101`
+
+5. **Allow TCP ports 7000-7002** through the firewall:
+
+```powershell
+# Windows (run as Administrator):
+New-NetFirewallRule -DisplayName "DS-CaseStudy" -Direction Inbound -Protocol TCP -LocalPort 7000-7002 -Action Allow
+```
+```bash
+# Linux:
+sudo ufw allow 7000:7002/tcp
+```
+
+### Step 1: Start the 3 Coordinator Nodes
+
+We run **2 nodes on Laptop A** and **1 node on Laptop B** (totaling 3 nodes across 2 machines).
+
+**Laptop A - Terminal 1 (Node 0):**
+```bash
+go run ./cmd/coordinator/ -id=0 -addr=:7000 -peers="1=192.168.1.100:7001,2=192.168.1.101:7002"
+```
+
+**Laptop A - Terminal 2 (Node 1):**
+```bash
+go run ./cmd/coordinator/ -id=1 -addr=:7001 -peers="0=192.168.1.100:7000,2=192.168.1.101:7002"
+```
+
+**Laptop B - Terminal 1 (Node 2):**
+```bash
+go run ./cmd/coordinator/ -id=2 -addr=:7002 -peers="0=192.168.1.100:7000,1=192.168.1.100:7001"
+```
+
+> **Wait ~2 seconds** - you will see election logs. One node becomes LEADER.
+
+### Step 2: Demonstrate Raft Leader Election
+
+Type `status` on each terminal:
+
+**Output on the leader (e.g., Node 0):**
+```
+> status
+  Node 0: State=LEADER, Term=1, KnownLeader=0
+  This node IS the leader
+```
+
+**Output on a follower (e.g., Node 2 on Laptop B):**
+```
+> status
+  Node 2: State=FOLLOWER, Term=1, KnownLeader=0
+  This node is a follower
+```
+
+**What this shows:** Raft Leader Election elected a single leader across 2 physical machines using majority vote (2/3 votes needed).
+
+### Step 3: Demonstrate Token Ring Mutual Exclusion
+
+**On the LEADER's terminal:**
+```
+> lock General_Chat Server_A
+  GRANTED critical section on "General_Chat" to [Server_A] (via Token Ring)
+
+> lock General_Chat Server_B
+> token
+  Token: HELD - IN CRITICAL SECTION (resource: General_Chat, holder: Server_A)
+
+> unlock General_Chat Server_A
+  Released critical section on "General_Chat" (token passed)
+
+> token
+  Token: NOT HERE (circulating in ring)
+```
+
+**What this shows:** The Token Ring algorithm controls access - only the token holder can enter the critical section. After release, the token passes to the next node in the ring (even across machines).
+
+### Step 4: Demonstrate Raft Log Replication (Consensus)
+
+**On the LEADER's terminal:**
+```
+> propose tx-001 add_room Gaming_Lounge Server_Alpha:9001
+  Proposing ADD_ROOM: Gaming_Lounge = Server_Alpha:9001...
+  Raft Log Entry COMMITTED (majority replicated)
+
+> propose tx-002 add_server Server_Beta 192.168.1.101:9002
+  Proposing ADD_SERVER: Server_Beta = 192.168.1.101:9002...
+  Raft Log Entry COMMITTED (majority replicated)
+
+> state
+  Routing Table (from Raft Log state machine):
+     Room: "Gaming_Lounge" -> Server_Alpha:9001
+     Server: "Server_Beta" -> 192.168.1.101:9002
+  Raft Log: 2 entries, CommitIndex: 1
+```
+
+**Now, on Laptop B's terminal (the follower):**
+```
+> state
+  Routing Table (from Raft Log state machine):
+     Room: "Gaming_Lounge" -> Server_Alpha:9001
+     Server: "Server_Beta" -> 192.168.1.101:9002
+  Raft Log: 2 entries, CommitIndex: 1
+```
+
+**What this shows:** Both machines show the SAME routing table - the leader proposed entries, sent AppendEntries RPCs over the network, and both followers replicated and committed. This is Raft Log Replication working across machines.
+
+### Step 5: Demonstrate Leader Failure & Recovery
+
+**Kill the leader** (Ctrl+C on the leader's terminal).
+
+**Wait ~1 second**, then type `status` on the surviving terminals:
+
+```
+> status
+  Node 2: State=LEADER, Term=2, KnownLeader=2
+  This node IS the leader
+```
+
+**What this shows:** The surviving nodes detected missing heartbeats, started a new election with a higher term, and elected a new leader - all automatically.
+
+**The new leader can continue all operations:**
+```
+> propose tx-003 add_room Study_Group Server_Alpha:9001
+  Raft Log Entry COMMITTED (majority replicated)
+```
+
+### Step 6: Full Chat Scenario (on the new leader)
+
+```
+> lock room_creation Coordinator
+  GRANTED critical section on "room_creation" to [Coordinator]
+
+> propose tx-004 add_room Study_Group Server_Alpha:9001
+  Raft Log Entry COMMITTED
+
+> unlock room_creation Coordinator
+  Released critical section on "room_creation"
+
+> state
+  Routing Table:
+     Room: "Gaming_Lounge" -> Server_Alpha:9001
+     Room: "Study_Group" -> Server_Alpha:9001
+     Server: "Server_Beta" -> 192.168.1.101:9002
+```
+
+---
+
+## Demo Descriptions
+
+### `demo_full_chat` - Full End-to-End Chat Demo (RECOMMENDED)
+Runs through 7 phases demonstrating all algorithms in a real chat scenario:
+1. **Cluster startup & Raft leader election** (3 nodes)
+2. **Register chat servers** via Raft consensus (Server_Alpha, Server_Beta)
+3. **Create chat rooms** using Token Ring mutex + Raft consensus (General_Chat, Gaming_Lounge)
+4. **Users join rooms & send messages** (Alice, Bob, Charlie)
+5. **Leader crashes -> automatic re-election** (Raft failure recovery)
+6. **New leader continues operations** (creates Study_Group room)
+7. **Concurrent room access** (Token Ring prevents conflicts)
+
+```bash
+go run ./demo/demo_full_chat/
+```
+
+### `demo_multi_node_rpc` - Multi-Node RPC Demo
+Runs 3 coordinator nodes on separate TCP ports (7000, 7001, 7002), all communicating over Go's `net/rpc`. Shows the same algorithms working over real network calls instead of in-process channels.
+
+```bash
+go run ./demo/demo_multi_node_rpc/
+```
+
+### `demo_leader_failure` - Raft Election & Failure Recovery
+Shows leader election, then kills the leader, and watches a new leader get elected.
+
+### `demo_mutual_exclusion` - Token Ring Algorithm
+Shows the token circulating, immediate grant, queued waiting, and release-and-pass.
+
+### `demo_consensus` - Raft Log Replication
+Shows log entry proposal, AppendEntries replication, majority commit, and routing table consistency across all nodes.
+
+---
+
+## Communication Architecture
+
+All inter-node communication uses **Go's native `net/rpc`** package over TCP.
+
+| RPC Method | Algorithm | Direction |
+|-----------|-----------|-----------|
+| `Node.RequestVote` | Raft Election | Candidate -> All |
+| `Node.RespondVote` | Raft Election | Voter -> Candidate |
+| `Node.SendHeartbeat` | Raft Election | Leader -> All |
+| `Node.AppendEntries` | Raft Log Replication | Leader -> Followers |
+| `Node.AppendEntriesReply` | Raft Log Replication | Follower -> Leader |
+| `Node.PassToken` | Token Ring | Current holder -> Next in ring |
+
+Demos use in-process channels for simplicity. The `cmd/coordinator` binary and `demo_multi_node_rpc` use real TCP/RPC.
+
+---
+
+*Built for DS Case Study - Distributed Systems, Semester 6*

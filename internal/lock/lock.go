@@ -132,9 +132,10 @@ func (t *TokenRingManager) handleTokenReceive(tok types.TokenMessage) {
 	t.mu.Lock()
 	t.hasToken = true
 	t.seqNum = tok.SeqNum
-	fmt.Printf("%s🪙 ← Received token (seq: %d) from predecessor\n", t.prefix, tok.SeqNum)
 
 	if len(t.waitQueue) > 0 {
+		// Only log when the token is actually being used
+		fmt.Printf("%s🪙 ← Received token (seq: %d) — granting queued request\n", t.prefix, tok.SeqNum)
 		// Grant access to the first waiting request
 		req := t.waitQueue[0]
 		t.waitQueue = t.waitQueue[1:]
@@ -157,7 +158,7 @@ func (t *TokenRingManager) handleTokenReceive(tok types.TokenMessage) {
 		return
 	}
 
-	// No one waiting, will be passed along by idlePass ticker
+	// No one waiting — pass along silently (idle circulation, no log)
 	t.mu.Unlock()
 }
 
@@ -167,12 +168,13 @@ func (t *TokenRingManager) idlePass() {
 	defer t.mu.Unlock()
 
 	if t.hasToken && !t.inCS && len(t.waitQueue) == 0 {
-		t.passTokenLocked()
+		t.passTokenLocked(false) // idle circulation — no log
 	}
 }
 
 // passTokenLocked passes the token to the next node in the ring. Caller must hold t.mu.
-func (t *TokenRingManager) passTokenLocked() {
+// verbose=true logs the pass (used during real lock ops); false suppresses idle-pass noise.
+func (t *TokenRingManager) passTokenLocked(verbose bool) {
 	nextIdx := (t.ringIndex + 1) % len(t.ringOrder)
 	nextNode := t.ringOrder[nextIdx]
 
@@ -182,8 +184,10 @@ func (t *TokenRingManager) passTokenLocked() {
 	}
 
 	t.hasToken = false
-	fmt.Printf("%s🪙 → Passing token (seq: %d) to Node %d\n",
-		t.prefix, tok.SeqNum, nextNode)
+	if verbose {
+		fmt.Printf("%s🪙 → Passing token (seq: %d) to Node %d\n",
+			t.prefix, tok.SeqNum, nextNode)
+	}
 
 	if t.OnPassToken != nil {
 		go t.OnPassToken(nextNode, tok)
@@ -277,7 +281,7 @@ func (t *TokenRingManager) ReleaseAccess(resource, requester string) bool {
 	}
 
 	// Nobody waiting locally, pass token to next node in the ring
-	t.passTokenLocked()
+	t.passTokenLocked(true) // real release — log it
 	return true
 }
 

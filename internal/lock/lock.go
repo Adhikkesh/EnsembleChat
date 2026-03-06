@@ -93,10 +93,10 @@ func NewTokenRingManager(nodeID int, ringOrder []int, initialHolder int) *TokenR
 func (t *TokenRingManager) Start() {
 	go t.run()
 	if t.hasToken {
-		fmt.Printf("%s🪙 Token Ring started — THIS NODE holds the initial token (ring: %v)\n",
+		fmt.Printf("%s[TOKEN] Token Ring started -- THIS NODE holds the initial token (ring: %v)\n",
 			t.prefix, t.ringOrder)
 	} else {
-		fmt.Printf("%s🔄 Token Ring started — waiting for token (ring: %v)\n",
+		fmt.Printf("%s[TOKEN] Token Ring started -- waiting for token (ring: %v)\n",
 			t.prefix, t.ringOrder)
 	}
 }
@@ -135,7 +135,7 @@ func (t *TokenRingManager) handleTokenReceive(tok types.TokenMessage) {
 
 	if len(t.waitQueue) > 0 {
 		// Only log when the token is actually being used
-		fmt.Printf("%s🪙 ← Received token (seq: %d) — granting queued request\n", t.prefix, tok.SeqNum)
+		fmt.Printf("%s[TOKEN] <- Received token (seq: %d) -- granting queued request\n", t.prefix, tok.SeqNum)
 		// Grant access to the first waiting request
 		req := t.waitQueue[0]
 		t.waitQueue = t.waitQueue[1:]
@@ -144,7 +144,7 @@ func (t *TokenRingManager) handleTokenReceive(tok types.TokenMessage) {
 		t.csHolder = req.requester
 		t.csResource = req.resource
 
-		fmt.Printf("%s🪙 ✅ GRANTED critical section to [%s] for resource \"%s\"\n",
+		fmt.Printf("%s[TOKEN] GRANTED critical section to [%s] for resource \"%s\"\n",
 			t.prefix, req.requester, req.resource)
 
 		t.mu.Unlock()
@@ -185,7 +185,7 @@ func (t *TokenRingManager) passTokenLocked(verbose bool) {
 
 	t.hasToken = false
 	if verbose {
-		fmt.Printf("%s🪙 → Passing token (seq: %d) to Node %d\n",
+		fmt.Printf("%s[TOKEN] -> Passing token (seq: %d) to Node %d\n",
 			t.prefix, tok.SeqNum, nextNode)
 	}
 
@@ -205,7 +205,7 @@ func (t *TokenRingManager) RequestAccess(resource, requester string) types.LockR
 		t.csHolder = requester
 		t.csResource = resource
 
-		fmt.Printf("%s🪙 ✅ GRANTED critical section immediately to [%s] for \"%s\" (token already held)\n",
+		fmt.Printf("%s[TOKEN] GRANTED critical section immediately to [%s] for \"%s\" (token already held)\n",
 			t.prefix, requester, resource)
 
 		t.mu.Unlock()
@@ -225,7 +225,7 @@ func (t *TokenRingManager) RequestAccess(resource, requester string) types.LockR
 		responseCh: responseCh,
 	})
 
-	fmt.Printf("%s🪙 ⏳ [%s] queued for critical section on \"%s\" (waiting for token...)\n",
+	fmt.Printf("%s[TOKEN] [%s] queued for critical section on \"%s\" (waiting for token...)\n",
 		t.prefix, requester, resource)
 
 	t.mu.Unlock()
@@ -240,17 +240,17 @@ func (t *TokenRingManager) ReleaseAccess(resource, requester string) bool {
 	defer t.mu.Unlock()
 
 	if !t.inCS {
-		fmt.Printf("%s⚠️ Cannot release — not in critical section\n", t.prefix)
+		fmt.Printf("%s[WARN] Cannot release -- not in critical section\n", t.prefix)
 		return false
 	}
 
 	if t.csHolder != requester {
-		fmt.Printf("%s⚠️ Cannot release — held by [%s], not [%s]\n",
+		fmt.Printf("%s[WARN] Cannot release -- held by [%s], not [%s]\n",
 			t.prefix, t.csHolder, requester)
 		return false
 	}
 
-	fmt.Printf("%s🪙 🔓 [%s] exited critical section for \"%s\"\n",
+	fmt.Printf("%s[TOKEN] [UNLOCK] [%s] exited critical section for \"%s\"\n",
 		t.prefix, requester, resource)
 
 	t.inCS = false
@@ -266,7 +266,7 @@ func (t *TokenRingManager) ReleaseAccess(resource, requester string) bool {
 		t.csHolder = req.requester
 		t.csResource = req.resource
 
-		fmt.Printf("%s🪙 ✅ GRANTED critical section to next queued: [%s] for \"%s\"\n",
+		fmt.Printf("%s[TOKEN] GRANTED critical section to next queued: [%s] for \"%s\"\n",
 			t.prefix, req.requester, req.resource)
 
 		go func() {

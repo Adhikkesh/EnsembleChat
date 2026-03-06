@@ -105,7 +105,7 @@ func (r *RaftLog) BecomeLeader(term int) {
 		r.matchIndex[pid] = -1
 	}
 
-	fmt.Printf("%s👑 Initialized as leader for term %d (log length: %d)\n",
+	fmt.Printf("%s[LEADER] Initialized as leader for term %d (log length: %d)\n",
 		r.prefix, term, len(r.log))
 }
 
@@ -126,7 +126,7 @@ func (r *RaftLog) ProposeEntry(change types.ChangeType, key, value string) bool 
 	r.mu.Lock()
 
 	if !r.isLeader {
-		fmt.Printf("%s⚠️ Cannot propose — not the leader\n", r.prefix)
+		fmt.Printf("%s[WARN] Cannot propose -- not the leader\n", r.prefix)
 		r.mu.Unlock()
 		return false
 	}
@@ -142,7 +142,7 @@ func (r *RaftLog) ProposeEntry(change types.ChangeType, key, value string) bool 
 	r.log = append(r.log, entry)
 
 	fmt.Printf("%s\n", "══════════════════════════════════════════════════════════════")
-	fmt.Printf("%s📋 PROPOSING LOG ENTRY #%d (Raft Log Replication)\n", r.prefix, entry.Index)
+	fmt.Printf("%s[RAFT] PROPOSING LOG ENTRY #%d (Raft Log Replication)\n", r.prefix, entry.Index)
 	fmt.Printf("%s   Term: %d | Change: %s | Key: \"%s\" | Value: \"%s\"\n",
 		r.prefix, entry.Term, change, key, value)
 	fmt.Printf("%s   Replicating to %d followers via AppendEntries RPC...\n", r.prefix, len(r.peers))
@@ -204,7 +204,7 @@ func (r *RaftLog) sendAppendEntriesTo(followerID int) {
 	}
 
 	if len(entries) > 0 {
-		fmt.Printf("%s📤 Sending AppendEntries to Node %d: %d entries (prevIdx=%d, prevTerm=%d)\n",
+		fmt.Printf("%s[RAFT] Sending AppendEntries to Node %d: %d entries (prevIdx=%d, prevTerm=%d)\n",
 			r.prefix, followerID, len(entries), prevLogIndex, prevLogTerm)
 	}
 
@@ -219,7 +219,7 @@ func (r *RaftLog) waitForMajority(targetIndex int) bool {
 	totalNodes := len(r.peers) + 1
 	majority := (totalNodes / 2) + 1
 
-	fmt.Printf("%s⏳ Waiting for majority (%d/%d nodes) to replicate entry #%d...\n",
+	fmt.Printf("%s[WAIT] Waiting for majority (%d/%d nodes) to replicate entry #%d...\n",
 		r.prefix, majority, totalNodes, targetIndex)
 
 	for {
@@ -232,15 +232,15 @@ func (r *RaftLog) waitForMajority(targetIndex int) bool {
 				r.applyCommitted()
 				r.mu.Unlock()
 
-				fmt.Printf("%s✅ ═══════════════════════════════════════════\n", r.prefix)
-				fmt.Printf("%s✅ ENTRY #%d COMMITTED (majority reached)\n", r.prefix, targetIndex)
-				fmt.Printf("%s✅ ═══════════════════════════════════════════\n", r.prefix)
+				fmt.Printf("%s[OK] ===============================================\n", r.prefix)
+				fmt.Printf("%s[OK] ENTRY #%d COMMITTED (majority reached)\n", r.prefix, targetIndex)
+				fmt.Printf("%s[OK] ===============================================\n", r.prefix)
 				return true
 			}
 			r.mu.Unlock()
 
 		case <-deadline:
-			fmt.Printf("%s❌ Timeout waiting for majority replication of entry #%d\n",
+			fmt.Printf("%s[FAIL] Timeout waiting for majority replication of entry #%d\n",
 				r.prefix, targetIndex)
 			return false
 
@@ -257,7 +257,7 @@ func (r *RaftLog) handleAppendEntriesResponse(resp types.AppendEntriesResponse) 
 
 	// If the follower's term is higher, step down
 	if resp.Term > r.currentTerm {
-		fmt.Printf("%s📉 Received higher term %d from Node %d. Stepping down.\n",
+		fmt.Printf("%s[STEP-DOWN] Received higher term %d from Node %d. Stepping down.\n",
 			r.prefix, resp.Term, resp.FollowerID)
 		r.isLeader = false
 		r.currentTerm = resp.Term
@@ -269,7 +269,7 @@ func (r *RaftLog) handleAppendEntriesResponse(resp types.AppendEntriesResponse) 
 		r.matchIndex[resp.FollowerID] = resp.MatchIndex
 		r.nextIndex[resp.FollowerID] = resp.MatchIndex + 1
 
-		fmt.Printf("%s   ✅ Node %d replicated up to index %d\n",
+		fmt.Printf("%s   [OK] Node %d replicated up to index %d\n",
 			r.prefix, resp.FollowerID, resp.MatchIndex)
 
 		// Try to advance commit index
@@ -279,7 +279,7 @@ func (r *RaftLog) handleAppendEntriesResponse(resp types.AppendEntriesResponse) 
 		if r.nextIndex[resp.FollowerID] > 0 {
 			r.nextIndex[resp.FollowerID]--
 		}
-		fmt.Printf("%s   ❌ Node %d rejected AppendEntries. Retrying with nextIndex=%d\n",
+		fmt.Printf("%s   [FAIL] Node %d rejected AppendEntries. Retrying with nextIndex=%d\n",
 			r.prefix, resp.FollowerID, r.nextIndex[resp.FollowerID])
 
 		// Retry with decremented nextIndex
@@ -310,7 +310,7 @@ func (r *RaftLog) tryAdvanceCommitIndex() {
 		if count >= majority {
 			oldCommit := r.commitIndex
 			r.commitIndex = n
-			fmt.Printf("%s📊 Commit index advanced: %d → %d (replicated on %d/%d nodes)\n",
+			fmt.Printf("%s[COMMIT] Commit index advanced: %d -> %d (replicated on %d/%d nodes)\n",
 				r.prefix, oldCommit, n, count, totalNodes)
 			break
 		}
@@ -336,12 +336,12 @@ func (r *RaftLog) applyEntry(entry types.LogEntry) {
 			ServerAddr: entry.Value,
 			CreatedAt:  time.Now(),
 		}
-		fmt.Printf("%s📝 Applied entry #%d to state machine: Room \"%s\" → %s\n",
+		fmt.Printf("%s[APPLY] Applied entry #%d to state machine: Room \"%s\" -> %s\n",
 			r.prefix, entry.Index, entry.Key, entry.Value)
 
 	case types.ChangeAddServer:
 		r.RoutingTable.Servers[entry.Key] = entry.Value
-		fmt.Printf("%s📝 Applied entry #%d to state machine: Server \"%s\" → %s\n",
+		fmt.Printf("%s[APPLY] Applied entry #%d to state machine: Server \"%s\" -> %s\n",
 			r.prefix, entry.Index, entry.Key, entry.Value)
 	}
 }
@@ -361,7 +361,7 @@ func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
 
 	// Rule 1: Reply false if term < currentTerm (§5.1)
 	if req.Term < r.currentTerm {
-		fmt.Printf("%s❌ Rejected AppendEntries from Node %d (term %d < our term %d)\n",
+		fmt.Printf("%s[DENIED] Rejected AppendEntries from Node %d (term %d < our term %d)\n",
 			r.prefix, req.LeaderID, req.Term, r.currentTerm)
 		resp := types.AppendEntriesResponse{
 			Term:       r.currentTerm,
@@ -382,7 +382,7 @@ func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
 	// whose term matches prevLogTerm (§5.3)
 	if req.PrevLogIndex >= 0 {
 		if req.PrevLogIndex >= len(r.log) {
-			fmt.Printf("%s❌ Log too short: prevLogIndex=%d but log length=%d\n",
+			fmt.Printf("%s[DENIED] Log too short: prevLogIndex=%d but log length=%d\n",
 				r.prefix, req.PrevLogIndex, len(r.log))
 			resp := types.AppendEntriesResponse{
 				Term:       r.currentTerm,
@@ -397,7 +397,7 @@ func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
 			return
 		}
 		if r.log[req.PrevLogIndex].Term != req.PrevLogTerm {
-			fmt.Printf("%s❌ Log mismatch at index %d: expected term %d, got term %d. Truncating.\n",
+			fmt.Printf("%s[DENIED] Log mismatch at index %d: expected term %d, got term %d. Truncating.\n",
 				r.prefix, req.PrevLogIndex, req.PrevLogTerm, r.log[req.PrevLogIndex].Term)
 			// Delete the conflicting entry and everything after it
 			r.log = r.log[:req.PrevLogIndex]
@@ -437,7 +437,7 @@ func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
 	}
 
 	if len(req.Entries) > 0 {
-		fmt.Printf("%s📥 Appended %d entries from leader (log length now: %d)\n",
+		fmt.Printf("%s[RAFT] Appended %d entries from leader (log length now: %d)\n",
 			r.prefix, len(req.Entries), len(r.log))
 	}
 
@@ -452,7 +452,7 @@ func (r *RaftLog) HandleAppendEntries(req types.AppendEntriesRequest) {
 			r.commitIndex = lastNewIdx
 		}
 		if r.commitIndex > oldCommit {
-			fmt.Printf("%s📊 Commit index updated: %d → %d\n",
+			fmt.Printf("%s[COMMIT] Commit index updated: %d -> %d\n",
 				r.prefix, oldCommit, r.commitIndex)
 			r.applyCommitted()
 		}

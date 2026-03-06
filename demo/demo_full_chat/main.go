@@ -67,9 +67,9 @@ func main() {
 	fmt.Println()
 	for _, n := range nodes {
 		state, term, lid := n.Election.GetState()
-		role := "📥 Follower"
+		role := "Follower"
 		if n.Election.IsLeader() {
-			role = "👑 LEADER"
+			role = "LEADER"
 		}
 		fmt.Printf("    Node %d:  %s  |  State=%s  Term=%d  LeaderID=%d\n",
 			n.ID, role, state, term, lid)
@@ -183,10 +183,10 @@ func main() {
 		}
 		fmt.Printf("    [%s Node %d]\n", role, n.ID)
 		for name, entry := range rt.Rooms {
-			fmt.Printf("       🏠 Room \"%s\" → %s\n", name, entry.ServerAddr)
+			fmt.Printf("       Room \"%s\" -> %s\n", name, entry.ServerAddr)
 		}
 		for name, addr := range rt.Servers {
-			fmt.Printf("       🖥️  Server \"%s\" → %s\n", name, addr)
+			fmt.Printf("       Server \"%s\" -> %s\n", name, addr)
 		}
 	}
 	divider()
@@ -246,17 +246,17 @@ func main() {
 	info("Users send messages:")
 	fmt.Println()
 
-	alice.SendMessage("General_Chat", "Hey everyone! Welcome to the General Chat 👋")
-	serverAlpha.SendMessage("General_Chat", "Alice", "Hey everyone! Welcome to the General Chat 👋")
+	alice.SendMessage("General_Chat", "Hey everyone! Welcome to the General Chat")
+	serverAlpha.SendMessage("General_Chat", "Alice", "Hey everyone! Welcome to the General Chat")
 
-	bob.SendMessage("General_Chat", "Hi Alice! Glad to be here 🎉")
-	serverAlpha.SendMessage("General_Chat", "Bob", "Hi Alice! Glad to be here 🎉")
+	bob.SendMessage("General_Chat", "Hi Alice! Glad to be here")
+	serverAlpha.SendMessage("General_Chat", "Bob", "Hi Alice! Glad to be here")
 
-	charlie.SendMessage("Gaming_Lounge", "Anyone up for a game? 🎮")
-	serverBeta.SendMessage("Gaming_Lounge", "Charlie", "Anyone up for a game? 🎮")
+	charlie.SendMessage("Gaming_Lounge", "Anyone up for a game?")
+	serverBeta.SendMessage("Gaming_Lounge", "Charlie", "Anyone up for a game?")
 
 	// Bob also receives Alice's message
-	bob.ReceiveMessage("General_Chat", "Alice", "Hey everyone! Welcome to the General Chat 👋")
+	bob.ReceiveMessage("General_Chat", "Alice", "Hey everyone! Welcome to the General Chat")
 
 	fmt.Println()
 	info("Chat messages stored on servers:")
@@ -276,7 +276,7 @@ func main() {
 			"  automatically without any manual intervention.")
 
 	oldLeaderID := leader.ID
-	fmt.Printf("    %s💀 KILLING Leader Node %d...%s\n\n",
+	fmt.Printf("    %s[KILLED] KILLING Leader Node %d...%s\n\n",
 		types.ColorRed+types.ColorBold, oldLeaderID, types.ColorReset)
 	leader.Kill()
 
@@ -303,13 +303,13 @@ func main() {
 	fmt.Println()
 	for _, n := range nodes {
 		if !n.IsAlive() {
-			fmt.Printf("    Node %d:  💀 DEAD (was the old leader)\n", n.ID)
+			fmt.Printf("    Node %d:  DEAD (was the old leader)\n", n.ID)
 			continue
 		}
 		state, term, lid := n.Election.GetState()
-		role := "📥 Follower"
+		role := "Follower"
 		if n.Election.IsLeader() {
-			role = "👑 NEW LEADER"
+			role = "NEW LEADER"
 		}
 		fmt.Printf("    Node %d:  %s  |  State=%s  Term=%d  LeaderID=%d\n",
 			n.ID, role, state, term, lid)
@@ -347,8 +347,8 @@ func main() {
 
 		// Alice sends message via new leader
 		fmt.Println()
-		alice.SendMessage("General_Chat", "The system recovered! New leader is handling things 🚀")
-		serverAlpha.SendMessage("General_Chat", "Alice", "The system recovered! New leader is handling things 🚀")
+		alice.SendMessage("General_Chat", "The system recovered! New leader is handling things")
+		serverAlpha.SendMessage("General_Chat", "Alice", "The system recovered! New leader is handling things")
 
 		fmt.Println()
 		info("Routing table on surviving nodes:")
@@ -434,22 +434,22 @@ func main() {
 	fmt.Println("╠══════════════════════════════════════════════════════════════════════════╣")
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  ALGORITHM 1: Raft Leader Election                                       ║")
-	fmt.Println("║     ✅ 3 nodes started as followers                                      ║")
-	fmt.Println("║     ✅ Leader elected via majority vote (2/3)                             ║")
-	fmt.Println("║     ✅ Leader crashed → detected via heartbeat timeout                    ║")
-	fmt.Println("║     ✅ New leader elected automatically with higher term                  ║")
+	fmt.Println("║     [OK] 3 nodes started as followers                                    ║")
+	fmt.Println("║     [OK] Leader elected via majority vote (2/3)                           ║")
+	fmt.Println("║     [OK] Leader crashed -> detected via heartbeat timeout                 ║")
+	fmt.Println("║     [OK] New leader elected automatically with higher term                ║")
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  ALGORITHM 2: Raft Log Replication (Consensus)                           ║")
-	fmt.Println("║     ✅ Server registrations replicated across all nodes                   ║")
-	fmt.Println("║     ✅ Chat room metadata replicated via AppendEntries RPC                ║")
-	fmt.Println("║     ✅ Majority quorum required for commit (2/3 nodes)                    ║")
-	fmt.Println("║     ✅ All nodes converge to identical routing table                      ║")
+	fmt.Println("║     [OK] Server registrations replicated across all nodes                 ║")
+	fmt.Println("║     [OK] Chat room metadata replicated via AppendEntries RPC              ║")
+	fmt.Println("║     [OK] Majority quorum required for commit (2/3 nodes)                  ║")
+	fmt.Println("║     [OK] All nodes converge to identical routing table                    ║")
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  ALGORITHM 3: Token Ring Mutual Exclusion                                ║")
-	fmt.Println("║     ✅ Token circulates: Node 0 → Node 1 → Node 2 → Node 0               ║")
-	fmt.Println("║     ✅ Room creation requires token (exclusive access)                    ║")
-	fmt.Println("║     ✅ Room joins serialized via token (no concurrent corruption)          ║")
-	fmt.Println("║     ✅ Concurrent access handled — one waits, one proceeds                ║")
+	fmt.Println("║     [OK] Token circulates: Node 0 -> Node 1 -> Node 2 -> Node 0          ║")
+	fmt.Println("║     [OK] Room creation requires token (exclusive access)                  ║")
+	fmt.Println("║     [OK] Room joins serialized via token (no concurrent corruption)        ║")
+	fmt.Println("║     [OK] Concurrent access handled -- one waits, one proceeds             ║")
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  USE CASES DEMONSTRATED:                                                 ║")
 	fmt.Println("║     1. Register chat servers in the distributed cluster                   ║")
@@ -492,15 +492,15 @@ func phase(tag, title, description string) {
 }
 
 func info(msg string) {
-	fmt.Printf("  %s⏳ %s%s\n", types.ColorCyan, msg, types.ColorReset)
+	fmt.Printf("  %s[WAIT] %s%s\n", types.ColorCyan, msg, types.ColorReset)
 }
 
 func success(msg string) {
-	fmt.Printf("  %s✅ %s%s\n", types.ColorGreen+types.ColorBold, msg, types.ColorReset)
+	fmt.Printf("  %s[OK] %s%s\n", types.ColorGreen+types.ColorBold, msg, types.ColorReset)
 }
 
 func fail(msg string) {
-	fmt.Printf("  %s❌ %s%s\n", types.ColorRed+types.ColorBold, msg, types.ColorReset)
+	fmt.Printf("  %s[FAIL] %s%s\n", types.ColorRed+types.ColorBold, msg, types.ColorReset)
 }
 
 func printResult(ok bool, msg string) {

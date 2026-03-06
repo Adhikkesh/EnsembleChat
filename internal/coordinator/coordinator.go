@@ -59,12 +59,12 @@ func NewCoordinatorNode(id int, peerIDs []int) *CoordinatorNode {
 
 	// Wire election callbacks to update the Raft log module
 	node.Election.OnBecomeLeader = func(term int) {
-		fmt.Printf("%s👑 I am now the LEADER (term %d)\n", node.prefix, term)
+		fmt.Printf("%s[LEADER] I am now the LEADER (term %d)\n", node.prefix, term)
 		node.RaftLog.BecomeLeader(term)
 	}
 
 	node.Election.OnBecomeFollower = func(leaderID, term int) {
-		fmt.Printf("%s📥 Following Leader Node %d (term %d)\n",
+		fmt.Printf("%s[FOLLOW] Following Leader Node %d (term %d)\n",
 			node.prefix, leaderID, term)
 		node.RaftLog.BecomeFollower(term)
 	}
@@ -74,7 +74,7 @@ func NewCoordinatorNode(id int, peerIDs []int) *CoordinatorNode {
 
 // Start begins the election and token ring modules.
 func (n *CoordinatorNode) Start() {
-	fmt.Printf("%s🚀 Starting coordinator node...\n", n.prefix)
+	fmt.Printf("%s[START] Starting coordinator node...\n", n.prefix)
 	n.Election.Start()
 	n.TokenRing.Start()
 }
@@ -89,7 +89,7 @@ func (n *CoordinatorNode) Stop() {
 		n.listener.Close()
 	}
 
-	fmt.Printf("%s🛑 Stopping coordinator node...\n", n.prefix)
+	fmt.Printf("%s[STOP] Stopping coordinator node...\n", n.prefix)
 	n.Election.Stop()
 	n.TokenRing.Stop()
 	n.RaftLog.Stop()
@@ -141,7 +141,7 @@ func (n *CoordinatorNode) StartRPC() error {
 	svc := transport.NewNodeRPC(n) // n satisfies transport.RPCHandler
 	transport.StartRPCServer(ln, svc)
 
-	fmt.Printf("%s📡 RPC server started on %s\n", n.prefix, n.Addr)
+	fmt.Printf("%s[RPC] RPC server started on %s\n", n.prefix, n.Addr)
 	return nil
 }
 
@@ -156,7 +156,7 @@ func (n *CoordinatorNode) rpcClient(peerID int) *transport.RPCClient {
 	}
 	addr, ok := n.PeerAddrs[peerID]
 	if !ok {
-		fmt.Printf("%s⚠️  No address for peer %d\n", n.prefix, peerID)
+		fmt.Printf("%s[WARN] No address for peer %d\n", n.prefix, peerID)
 		return nil
 	}
 	c := transport.NewRPCClient(addr, n.prefix)
@@ -312,9 +312,9 @@ func (n *CoordinatorNode) Kill() {
 	n.mu.Unlock()
 	n.Election.Stop()
 	n.TokenRing.Stop()
-	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
-	fmt.Printf("%s💀 NODE KILLED (simulating crash)\n", n.prefix)
-	fmt.Printf("%s💀 ═══════════════════════════════════════════\n", n.prefix)
+	fmt.Printf("%s[KILLED] ===============================================\n", n.prefix)
+	fmt.Printf("%s[KILLED] NODE KILLED (simulating crash)\n", n.prefix)
+	fmt.Printf("%s[KILLED] ===============================================\n", n.prefix)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -334,7 +334,7 @@ func (n *CoordinatorNode) ReleaseLock(resource, requester string) bool {
 // ProposeChange proposes a change via Raft Log Replication (in-process mode).
 func (n *CoordinatorNode) ProposeChange(txID string, change types.ChangeType, key, value string) bool {
 	if !n.Election.IsLeader() {
-		fmt.Printf("%s⚠️  Cannot propose change — not the leader\n", n.prefix)
+		fmt.Printf("%s[WARN] Cannot propose change -- not the leader\n", n.prefix)
 		return false
 	}
 
@@ -344,7 +344,7 @@ func (n *CoordinatorNode) ProposeChange(txID string, change types.ChangeType, ke
 // ProposeChangeRPC proposes a change via Raft Log Replication (RPC mode).
 func (n *CoordinatorNode) ProposeChangeRPC(txID string, change types.ChangeType, key, value string) bool {
 	if !n.Election.IsLeader() {
-		fmt.Printf("%s⚠️  Cannot propose change — not the leader\n", n.prefix)
+		fmt.Printf("%s[WARN] Cannot propose change -- not the leader\n", n.prefix)
 		return false
 	}
 

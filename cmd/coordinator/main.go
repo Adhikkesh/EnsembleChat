@@ -20,7 +20,7 @@ func main() {
 	peers := flag.String("peers", "", "Comma-separated peer list: id=host:port,id=host:port,...")
 	flag.Parse()
 
-	fmt.Printf("%s🚀 Starting Coordinator Node %d at %s%s\n",
+	fmt.Printf("%s[START] Starting Coordinator Node %d at %s%s\n",
 		types.ColorGreen+types.ColorBold, *id, *addr, types.ColorReset)
 
 	// Parse peers into map[int]string and collect peer IDs
@@ -60,7 +60,7 @@ func main() {
 	// Begin the election loop
 	node.Start()
 
-	fmt.Printf("%s📡 Coordinator Node %d running. Type 'help' for commands.%s\n",
+	fmt.Printf("%s[RPC] Coordinator Node %d running. Type 'help' for commands.%s\n",
 		types.ColorCyan, *id, types.ColorReset)
 	fmt.Println()
 
@@ -69,7 +69,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Printf("\n%s🛑 Shutting down Coordinator Node %d...%s\n",
+		fmt.Printf("\n%s[STOP] Shutting down Coordinator Node %d...%s\n",
 			types.ColorYellow, *id, types.ColorReset)
 		node.Stop()
 		os.Exit(0)
@@ -102,10 +102,10 @@ func main() {
 			fmt.Printf("  Node %d: State=%s, Term=%d, KnownLeader=%d\n",
 				node.ID, state, term, leaderID)
 			if node.Election.IsLeader() {
-				fmt.Printf("  %s👑 This node IS the leader%s\n",
+				fmt.Printf("  %s[LEADER] This node IS the leader%s\n",
 					types.ColorGreen+types.ColorBold, types.ColorReset)
 			} else {
-				fmt.Printf("  %s📥 This node is a follower%s\n",
+				fmt.Printf("  %s[FOLLOW] This node is a follower%s\n",
 					types.ColorBlue, types.ColorReset)
 			}
 
@@ -116,10 +116,10 @@ func main() {
 			}
 			resp := node.AcquireLock(parts[1], parts[2])
 			if resp.Granted {
-				fmt.Printf("  %s✅ GRANTED critical section on \"%s\" to [%s] (via Token Ring)%s\n",
+				fmt.Printf("  %s[OK] GRANTED critical section on \"%s\" to [%s] (via Token Ring)%s\n",
 					types.ColorGreen, resp.Resource, resp.Holder, types.ColorReset)
 			} else {
-				fmt.Printf("  %s❌ DENIED critical section on \"%s\" — %s%s\n",
+				fmt.Printf("  %s[DENIED] DENIED critical section on \"%s\" -- %s%s\n",
 					types.ColorRed, resp.Resource, resp.Reason, types.ColorReset)
 			}
 
@@ -130,23 +130,23 @@ func main() {
 			}
 			ok := node.ReleaseLock(parts[1], parts[2])
 			if ok {
-				fmt.Printf("  %s🔓 Released critical section on \"%s\" (token passed)%s\n",
+				fmt.Printf("  %s[UNLOCK] Released critical section on \"%s\" (token passed)%s\n",
 					types.ColorGreen, parts[1], types.ColorReset)
 			} else {
-				fmt.Printf("  %s❌ Failed to release on \"%s\"%s\n",
+				fmt.Printf("  %s[FAIL] Failed to release on \"%s\"%s\n",
 					types.ColorRed, parts[1], types.ColorReset)
 			}
 
 		case "token":
 			hasToken, inCS, resource, holder := node.TokenRing.GetStatus()
 			if hasToken && inCS {
-				fmt.Printf("  🪙 Token: HELD — IN CRITICAL SECTION (resource: %s, holder: %s)\n", resource, holder)
+				fmt.Printf("  [TOKEN] Token: HELD -- IN CRITICAL SECTION (resource: %s, holder: %s)\n", resource, holder)
 			} else if hasToken {
-				fmt.Println("  🪙 Token: HELD (idle, will pass soon)")
+				fmt.Println("  [TOKEN] Token: HELD (idle, will pass soon)")
 			} else {
-				fmt.Println("  🪙 Token: NOT HERE (circulating in ring)")
+				fmt.Println("  [TOKEN] Token: NOT HERE (circulating in ring)")
 			}
-			fmt.Printf("  🔄 Next node in ring: Node %d\n", node.TokenRing.GetNextNode())
+			fmt.Printf("  [RING] Next node in ring: Node %d\n", node.TokenRing.GetNextNode())
 
 		case "propose":
 			// propose <txID> <add_room|add_server> <key> <value>
@@ -168,20 +168,20 @@ func main() {
 			key := parts[3]
 			value := parts[4]
 
-			fmt.Printf("  %s📤 Proposing %s: %s = %s (tx: %s)...%s\n",
+			fmt.Printf("  %s[PROPOSE] Proposing %s: %s = %s (tx: %s)...%s\n",
 				types.ColorPurple, changeType, key, value, txID, types.ColorReset)
 
 			success := node.ProposeChangeRPC(txID, changeType, key, value)
 			if success {
-				fmt.Printf("  %s✅ Raft Log Entry COMMITTED (majority replicated)%s\n",
+				fmt.Printf("  %s[OK] Raft Log Entry COMMITTED (majority replicated)%s\n",
 					types.ColorGreen+types.ColorBold, types.ColorReset)
 			} else {
-				fmt.Printf("  %s❌ Raft Log Entry FAILED to commit%s\n",
+				fmt.Printf("  %s[FAIL] Raft Log Entry FAILED to commit%s\n",
 					types.ColorRed+types.ColorBold, types.ColorReset)
 			}
 
 		case "state":
-			fmt.Println("  📋 Routing Table (from Raft Log state machine):")
+			fmt.Println("  [LOG] Routing Table (from Raft Log state machine):")
 			rt := node.RaftLog.GetRoutingTable()
 			if len(rt.Rooms) == 0 && len(rt.Servers) == 0 {
 				fmt.Println("     (empty)")
@@ -195,10 +195,10 @@ func main() {
 			}
 			log := node.RaftLog.GetLog()
 			commitIdx := node.RaftLog.GetCommitIndex()
-			fmt.Printf("  📋 Raft Log: %d entries, CommitIndex: %d\n", len(log), commitIdx)
+			fmt.Printf("  [LOG] Raft Log: %d entries, CommitIndex: %d\n", len(log), commitIdx)
 
 		case "quit", "exit":
-			fmt.Printf("%s🛑 Shutting down Coordinator Node %d...%s\n",
+			fmt.Printf("%s[STOP] Shutting down Coordinator Node %d...%s\n",
 				types.ColorYellow, *id, types.ColorReset)
 			node.Stop()
 			return

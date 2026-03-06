@@ -16,21 +16,21 @@ func main() {
 	addr := flag.String("addr", ":9001", "Listen address for client connections")
 	flag.Parse()
 
-	fmt.Printf("%s🚀 Starting Chat Server \"%s\" at %s%s\n",
+	fmt.Printf("%s[START] Starting Chat Server \"%s\" at %s%s\n",
 		types.ColorBlue+types.ColorBold, *id, *addr, types.ColorReset)
 
 	server := chatserver.NewChatServer(*id, *addr)
 
 	server.CreateRoom("Lobby")
 
-	fmt.Printf("%s📡 Chat Server \"%s\" running. Press Ctrl+C to stop.%s\n",
+	fmt.Printf("%s[RPC] Chat Server \"%s\" running. Press Ctrl+C to stop.%s\n",
 		types.ColorCyan, *id, types.ColorReset)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	fmt.Printf("\n%s🛑 Shutting down Chat Server \"%s\"...%s\n",
+	fmt.Printf("\n%s[STOP] Shutting down Chat Server \"%s\"...%s\n",
 		types.ColorYellow, *id, types.ColorReset)
 
 	_ = server

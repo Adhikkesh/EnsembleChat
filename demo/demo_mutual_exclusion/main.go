@@ -35,7 +35,7 @@ func main() {
 	}
 
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "⏳ Waiting for election and token ring to initialize..." + types.ColorReset)
+	fmt.Println(types.ColorYellow + "[WAIT] Waiting for election and token ring to initialize..." + types.ColorReset)
 	time.Sleep(2 * time.Second)
 	fmt.Println()
 
@@ -48,10 +48,10 @@ func main() {
 	fmt.Println()
 
 	if resp0.Granted {
-		fmt.Printf("  %s✅ Server_A (via Node 0): GRANTED — %s%s\n",
+		fmt.Printf("  %s[OK] Server_A (via Node 0): GRANTED -- %s%s\n",
 			types.ColorGreen, resp0.Reason, types.ColorReset)
 	} else {
-		fmt.Printf("  %s❌ Server_A (via Node 0): DENIED — %s%s\n",
+		fmt.Printf("  %s[DENIED] Server_A (via Node 0): DENIED -- %s%s\n",
 			types.ColorRed, resp0.Reason, types.ColorReset)
 	}
 	fmt.Println()
@@ -88,7 +88,7 @@ func main() {
 	fmt.Println()
 
 	if resp1.Granted {
-		fmt.Printf("  %s✅ Server_B (via Node 1): GRANTED — %s%s\n",
+		fmt.Printf("  %s[OK] Server_B (via Node 1): GRANTED -- %s%s\n",
 			types.ColorGreen, resp1.Reason, types.ColorReset)
 	}
 	fmt.Println()

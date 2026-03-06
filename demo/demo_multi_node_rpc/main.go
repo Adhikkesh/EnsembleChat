@@ -54,7 +54,7 @@ func main() {
 
 	for _, n := range nodes {
 		if err := n.StartRPC(); err != nil {
-			fmt.Printf("%s❌ Failed to start RPC on Node %d: %v%s\n",
+			fmt.Printf("%s[FAIL] Failed to start RPC on Node %d: %v%s\n",
 				types.ColorRed, n.ID, err, types.ColorReset)
 			return
 		}
@@ -71,7 +71,7 @@ func main() {
 		n.Start()
 	}
 
-	fmt.Println(types.ColorYellow + "⏳ Waiting for leader election over RPC..." + types.ColorReset)
+	fmt.Println(types.ColorYellow + "[WAIT] Waiting for leader election over RPC..." + types.ColorReset)
 	time.Sleep(3 * time.Second)
 
 	var leader *coordinator.CoordinatorNode
@@ -82,7 +82,7 @@ func main() {
 		}
 	}
 	if leader == nil {
-		fmt.Println(types.ColorRed + "❌ No leader elected. Waiting longer..." + types.ColorReset)
+		fmt.Println(types.ColorRed + "[FAIL] No leader elected. Waiting longer..." + types.ColorReset)
 		time.Sleep(3 * time.Second)
 		for _, n := range nodes {
 			if n.Election.IsLeader() {
@@ -92,13 +92,13 @@ func main() {
 		}
 	}
 	if leader == nil {
-		fmt.Println(types.ColorRed + "❌ Leader election failed. Exiting." + types.ColorReset)
+		fmt.Println(types.ColorRed + "[FAIL] Leader election failed. Exiting." + types.ColorReset)
 		cleanup(nodes)
 		return
 	}
 
 	fmt.Println()
-	fmt.Printf("%s👑 Leader elected: Node %d (via Raft Leader Election over RPC)%s\n\n",
+	fmt.Printf("%s[LEADER] Leader elected: Node %d (via Raft Leader Election over RPC)%s\n\n",
 		types.ColorGreen+types.ColorBold, leader.ID, types.ColorReset)
 
 	// Show all nodes' states
@@ -116,13 +116,13 @@ func main() {
 
 	resp := leader.AcquireLock("ChatRoom_DB", "AdminService")
 	if resp.Granted {
-		fmt.Printf("  %s✅ Node %d acquired critical section for \"%s\" (holder: %s)%s\n",
+		fmt.Printf("  %s[OK] Node %d acquired critical section for \"%s\" (holder: %s)%s\n",
 			types.ColorGreen, leader.ID, resp.Resource, resp.Holder, types.ColorReset)
 	}
 
 	time.Sleep(500 * time.Millisecond)
 	leader.ReleaseLock("ChatRoom_DB", "AdminService")
-	fmt.Printf("  %s🔓 Node %d released critical section → token passed via RPC%s\n\n",
+	fmt.Printf("  %s[UNLOCK] Node %d released critical section -> token passed via RPC%s\n\n",
 		types.ColorGreen, leader.ID, types.ColorReset)
 
 	time.Sleep(600 * time.Millisecond) // let token circulate a bit
@@ -136,14 +136,14 @@ func main() {
 	ok1 := leader.ProposeChangeRPC("rpc-tx-1", types.ChangeAddRoom, "Gaming_Lounge", "Server_Alpha:9001")
 	fmt.Println()
 	if ok1 {
-		fmt.Printf("  %s✅ \"Gaming_Lounge\" committed via Raft majority over RPC%s\n",
+		fmt.Printf("  %s[OK] \"Gaming_Lounge\" committed via Raft majority over RPC%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
 	ok2 := leader.ProposeChangeRPC("rpc-tx-2", types.ChangeAddServer, "Server_Beta", "192.168.1.50:9002")
 	fmt.Println()
 	if ok2 {
-		fmt.Printf("  %s✅ \"Server_Beta\" registered via Raft majority over RPC%s\n",
+		fmt.Printf("  %s[OK] \"Server_Beta\" registered via Raft majority over RPC%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
@@ -162,12 +162,12 @@ func main() {
 		}
 		log := n.RaftLog.GetLog()
 		commitIdx := n.RaftLog.GetCommitIndex()
-		fmt.Printf("  📋 %s (Node %d) — Log: %d entries, CommitIndex: %d\n",
+		fmt.Printf("  [LOG] %s (Node %d) -- Log: %d entries, CommitIndex: %d\n",
 			role, n.ID, len(log), commitIdx)
 		for _, entry := range log {
-			status := "⏳"
+			status := "[WAIT]"
 			if entry.Index <= commitIdx {
-				status = "✅"
+				status = "[OK]"
 			}
 			fmt.Printf("     %s [#%d] %s \"%s\" → %s\n",
 				status, entry.Index, entry.Change, entry.Key, entry.Value)
@@ -188,10 +188,10 @@ func main() {
 		}
 	}
 	if allConsistent {
-		fmt.Printf("  %s✅ All nodes have identical routing tables — RPC replication CONSISTENT!%s\n",
+		fmt.Printf("  %s[OK] All nodes have identical routing tables -- RPC replication CONSISTENT!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	} else {
-		fmt.Printf("  %s❌ Routing tables differ — replication issue%s\n",
+		fmt.Printf("  %s[FAIL] Routing tables differ -- replication issue%s\n",
 			types.ColorRed, types.ColorReset)
 	}
 

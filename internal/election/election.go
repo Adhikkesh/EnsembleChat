@@ -124,7 +124,7 @@ func (e *ElectionNode) checkElectionTimeout() {
 	}
 
 	if time.Since(e.lastHeartbeat) > e.electionTimeout {
-		fmt.Printf("%s⏱ Election timeout! No heartbeat for %v. Starting election...\n",
+		fmt.Printf("%s[TIMEOUT] Election timeout! No heartbeat for %v. Starting election...\n",
 			e.prefix, e.electionTimeout)
 		e.startElection()
 	}
@@ -140,7 +140,7 @@ func (e *ElectionNode) startElection() {
 	e.electionTimeout = randomElectionTimeout()
 
 	term := e.CurrentTerm
-	fmt.Printf("%s🗳  Started election for term %d (voted for self, votes: 1)\n",
+	fmt.Printf("%s[VOTE] Started election for term %d (voted for self, votes: 1)\n",
 		e.prefix, term)
 
 	req := types.VoteRequest{
@@ -158,7 +158,7 @@ func (e *ElectionNode) handleVoteRequest(req types.VoteRequest) {
 	defer e.mu.Unlock()
 
 	if req.Term > e.CurrentTerm {
-		fmt.Printf("%s📩 Received VoteRequest from Node %d for term %d (higher than our term %d). Stepping down.\n",
+		fmt.Printf("%s[VOTE] Received VoteRequest from Node %d for term %d (higher than our term %d). Stepping down.\n",
 			e.prefix, req.CandidateID, req.Term, e.CurrentTerm)
 		e.CurrentTerm = req.Term
 		e.State = types.Follower
@@ -171,10 +171,10 @@ func (e *ElectionNode) handleVoteRequest(req types.VoteRequest) {
 		granted = true
 		e.VotedFor = req.CandidateID
 		e.lastHeartbeat = time.Now()
-		fmt.Printf("%s✅ Voted for Node %d in term %d\n",
+		fmt.Printf("%s[OK] Voted for Node %d in term %d\n",
 			e.prefix, req.CandidateID, req.Term)
 	} else {
-		fmt.Printf("%s❌ Denied vote to Node %d in term %d (already voted for %d)\n",
+		fmt.Printf("%s[DENIED] Denied vote to Node %d in term %d (already voted for %d)\n",
 			e.prefix, req.CandidateID, req.Term, e.VotedFor)
 	}
 
@@ -198,7 +198,7 @@ func (e *ElectionNode) handleVoteResponse(resp types.VoteResponse) {
 	}
 
 	if resp.Term > e.CurrentTerm {
-		fmt.Printf("%s📉 Received higher term %d from Node %d. Stepping down to Follower.\n",
+		fmt.Printf("%s[STEP-DOWN] Received higher term %d from Node %d. Stepping down to Follower.\n",
 			e.prefix, resp.Term, resp.VoterID)
 		e.CurrentTerm = resp.Term
 		e.State = types.Follower
@@ -213,7 +213,7 @@ func (e *ElectionNode) handleVoteResponse(resp types.VoteResponse) {
 
 	if resp.VoteGranted {
 		e.voteCount++
-		fmt.Printf("%s🎉 Received vote from Node %d for term %d (total votes: %d)\n",
+		fmt.Printf("%s[VOTE] Received vote from Node %d for term %d (total votes: %d)\n",
 			e.prefix, resp.VoterID, resp.Term, e.voteCount)
 
 		totalNodes := len(e.Peers) + 1
@@ -229,9 +229,9 @@ func (e *ElectionNode) becomeLeader() {
 	e.State = types.Leader
 	e.LeaderID = e.ID
 
-	fmt.Printf("%s👑 ═══════════════════════════════════════════\n", e.prefix)
-	fmt.Printf("%s👑 BECAME LEADER for term %d (received %d votes)\n", e.prefix, e.CurrentTerm, e.voteCount)
-	fmt.Printf("%s👑 ═══════════════════════════════════════════\n", e.prefix)
+	fmt.Printf("%s[LEADER] ===============================================\n", e.prefix)
+	fmt.Printf("%s[LEADER] BECAME LEADER for term %d (received %d votes)\n", e.prefix, e.CurrentTerm, e.voteCount)
+	fmt.Printf("%s[LEADER] ===============================================\n", e.prefix)
 
 	if e.OnBecomeLeader != nil {
 		go e.OnBecomeLeader(e.CurrentTerm)
@@ -254,7 +254,7 @@ func (e *ElectionNode) handleHeartbeat(hb types.Heartbeat) {
 	wasFollowerOfSameLeader := (e.State == types.Follower && e.LeaderID == hb.LeaderID)
 
 	if e.State != types.Follower {
-		fmt.Printf("%s📥 Stepping down to Follower (received heartbeat from Leader %d, term %d)\n",
+		fmt.Printf("%s[FOLLOW] Stepping down to Follower (received heartbeat from Leader %d, term %d)\n",
 			e.prefix, hb.LeaderID, hb.Term)
 	}
 

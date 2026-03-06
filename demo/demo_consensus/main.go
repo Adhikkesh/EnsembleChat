@@ -30,7 +30,7 @@ func main() {
 		n.Start()
 	}
 
-	fmt.Println(types.ColorYellow + "⏳ Waiting for leader election..." + types.ColorReset)
+	fmt.Println(types.ColorYellow + "[WAIT] Waiting for leader election..." + types.ColorReset)
 	time.Sleep(2 * time.Second)
 
 	var leader *coordinator.CoordinatorNode
@@ -42,7 +42,7 @@ func main() {
 	}
 
 	if leader == nil {
-		fmt.Println(types.ColorRed + "❌ No leader elected. Waiting more..." + types.ColorReset)
+		fmt.Println(types.ColorRed + "[FAIL] No leader elected. Waiting more..." + types.ColorReset)
 		time.Sleep(3 * time.Second)
 		for _, n := range nodes {
 			if n.Election.IsLeader() {
@@ -51,12 +51,12 @@ func main() {
 			}
 		}
 		if leader == nil {
-			fmt.Println(types.ColorRed + "❌ No leader. Exiting." + types.ColorReset)
+			fmt.Println(types.ColorRed + "[FAIL] No leader. Exiting." + types.ColorReset)
 			return
 		}
 	}
 
-	fmt.Printf("\n%s👑 Leader: Node %d%s\n\n",
+	fmt.Printf("\n%s[LEADER] Leader: Node %d%s\n\n",
 		types.ColorGreen+types.ColorBold, leader.ID, types.ColorReset)
 
 	// ━━━ STEP 2 ━━━
@@ -75,10 +75,10 @@ func main() {
 
 	fmt.Println()
 	if success {
-		fmt.Printf("%s✅ Entry COMMITTED — Room created via Raft majority!%s\n",
+		fmt.Printf("%s[OK] Entry COMMITTED -- Room created via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	} else {
-		fmt.Printf("%s❌ Entry FAILED to commit%s\n",
+		fmt.Printf("%s[FAIL] Entry FAILED to commit%s\n",
 			types.ColorRed+types.ColorBold, types.ColorReset)
 	}
 
@@ -95,7 +95,7 @@ func main() {
 
 	fmt.Println()
 	if success2 {
-		fmt.Printf("%s✅ Entry COMMITTED — Room created via Raft majority!%s\n",
+		fmt.Printf("%s[OK] Entry COMMITTED -- Room created via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
@@ -112,7 +112,7 @@ func main() {
 
 	fmt.Println()
 	if success3 {
-		fmt.Printf("%s✅ Entry COMMITTED — Server registered via Raft majority!%s\n",
+		fmt.Printf("%s[OK] Entry COMMITTED -- Server registered via Raft majority!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 
@@ -131,12 +131,12 @@ func main() {
 		}
 		log := n.RaftLog.GetLog()
 		commitIdx := n.RaftLog.GetCommitIndex()
-		fmt.Printf("  %s📋 %s (Node %d) — Log: %d entries, CommitIndex: %d%s\n",
+		fmt.Printf("  %s[LOG] %s (Node %d) -- Log: %d entries, CommitIndex: %d%s\n",
 			types.ColorCyan, role, n.ID, len(log), commitIdx, types.ColorReset)
 		for _, entry := range log {
 			committed := ""
 			if entry.Index <= commitIdx {
-				committed = " ✅ COMMITTED"
+				committed = " [OK] COMMITTED"
 			}
 			fmt.Printf("     [#%d term=%d] %s \"%s\" → %s%s\n",
 				entry.Index, entry.Term, entry.Change, entry.Key, entry.Value, committed)
@@ -149,7 +149,7 @@ func main() {
 	fmt.Println()
 
 	leaderRT := leader.RaftLog.GetRoutingTable()
-	fmt.Printf("  %s📋 Leader (Node %d) Routing Table:%s\n",
+	fmt.Printf("  %s[LOG] Leader (Node %d) Routing Table:%s\n",
 		types.ColorGreen, leader.ID, types.ColorReset)
 	printRoutingTable(leaderRT)
 
@@ -157,7 +157,7 @@ func main() {
 		if n.ID == leader.ID {
 			continue
 		}
-		fmt.Printf("  %s📋 Follower (Node %d) Routing Table:%s\n",
+		fmt.Printf("  %s[LOG] Follower (Node %d) Routing Table:%s\n",
 			types.ColorBlue, n.ID, types.ColorReset)
 		printRoutingTable(n.RaftLog.GetRoutingTable())
 	}
@@ -173,18 +173,18 @@ func main() {
 		followerRT := n.RaftLog.GetRoutingTable()
 		if len(followerRT.Rooms) != len(leaderRT.Rooms) {
 			allConsistent = false
-			fmt.Printf("  %s❌ Node %d has %d rooms, Leader has %d rooms%s\n",
+			fmt.Printf("  %s[FAIL] Node %d has %d rooms, Leader has %d rooms%s\n",
 				types.ColorRed, n.ID, len(followerRT.Rooms), len(leaderRT.Rooms), types.ColorReset)
 		}
 		if len(followerRT.Servers) != len(leaderRT.Servers) {
 			allConsistent = false
-			fmt.Printf("  %s❌ Node %d has %d servers, Leader has %d servers%s\n",
+			fmt.Printf("  %s[FAIL] Node %d has %d servers, Leader has %d servers%s\n",
 				types.ColorRed, n.ID, len(followerRT.Servers), len(leaderRT.Servers), types.ColorReset)
 		}
 	}
 
 	if allConsistent {
-		fmt.Printf("  %s✅ All nodes have identical routing tables — CONSISTENT!%s\n",
+		fmt.Printf("  %s[OK] All nodes have identical routing tables -- CONSISTENT!%s\n",
 			types.ColorGreen+types.ColorBold, types.ColorReset)
 	}
 

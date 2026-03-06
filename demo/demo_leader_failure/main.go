@@ -35,7 +35,7 @@ func main() {
 	}
 
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "⏳ Waiting for leader election..." + types.ColorReset)
+	fmt.Println(types.ColorYellow + "[WAIT] Waiting for leader election..." + types.ColorReset)
 	time.Sleep(2 * time.Second)
 
 	fmt.Println()
@@ -52,7 +52,7 @@ func main() {
 	}
 
 	if leaderNode == nil {
-		fmt.Println(types.ColorRed + "❌ No leader elected yet. Waiting longer..." + types.ColorReset)
+		fmt.Println(types.ColorRed + "[FAIL] No leader elected yet. Waiting longer..." + types.ColorReset)
 		time.Sleep(3 * time.Second)
 		for _, n := range nodes {
 			if n.Election.IsLeader() {
@@ -63,11 +63,11 @@ func main() {
 	}
 
 	if leaderNode == nil {
-		fmt.Println(types.ColorRed + "❌ Failed to elect a leader. Exiting." + types.ColorReset)
+		fmt.Println(types.ColorRed + "[FAIL] Failed to elect a leader. Exiting." + types.ColorReset)
 		return
 	}
 
-	fmt.Printf("\n%s👑 Current Leader: Node %d%s\n\n",
+	fmt.Printf("\n%s[LEADER] Current Leader: Node %d%s\n\n",
 		types.ColorGreen+types.ColorBold, leaderNode.ID, types.ColorReset)
 
 	fmt.Println(types.ColorRed + types.ColorBold)
@@ -78,7 +78,7 @@ func main() {
 	leaderNode.Kill()
 
 	fmt.Println()
-	fmt.Println(types.ColorYellow + "⏳ Waiting for followers to detect missing heartbeats and start new election..." + types.ColorReset)
+	fmt.Println(types.ColorYellow + "[WAIT] Waiting for followers to detect missing heartbeats and start new election..." + types.ColorReset)
 	time.Sleep(3 * time.Second)
 
 	fmt.Println()
@@ -87,7 +87,7 @@ func main() {
 	var newLeader *coordinator.CoordinatorNode
 	for _, n := range nodes {
 		if !n.IsAlive() {
-			fmt.Printf("  Node %d: 💀 DEAD (was the old leader)\n", n.ID)
+			fmt.Printf("  Node %d: DEAD (was the old leader)\n", n.ID)
 			continue
 		}
 		state, term, leaderID := n.Election.GetState()
@@ -100,11 +100,11 @@ func main() {
 
 	fmt.Println()
 	if newLeader != nil {
-		fmt.Printf("%s👑 NEW Leader Elected: Node %d%s\n",
+		fmt.Printf("%s[LEADER] NEW Leader Elected: Node %d%s\n",
 			types.ColorGreen+types.ColorBold, newLeader.ID, types.ColorReset)
-		fmt.Println(types.ColorGreen + "✅ Leader failover completed successfully!" + types.ColorReset)
+		fmt.Println(types.ColorGreen + "[OK] Leader failover completed successfully!" + types.ColorReset)
 	} else {
-		fmt.Println(types.ColorYellow + "⏳ Election still in progress... waiting more" + types.ColorReset)
+		fmt.Println(types.ColorYellow + "[WAIT] Election still in progress... waiting more" + types.ColorReset)
 		time.Sleep(3 * time.Second)
 		for _, n := range nodes {
 			if n.IsAlive() && n.Election.IsLeader() {
@@ -113,7 +113,7 @@ func main() {
 			}
 		}
 		if newLeader != nil {
-			fmt.Printf("%s👑 NEW Leader Elected: Node %d%s\n",
+			fmt.Printf("%s[LEADER] NEW Leader Elected: Node %d%s\n",
 				types.ColorGreen+types.ColorBold, newLeader.ID, types.ColorReset)
 		}
 	}

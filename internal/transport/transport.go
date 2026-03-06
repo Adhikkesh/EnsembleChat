@@ -132,7 +132,7 @@ func (c *RPCClient) callAsync(method string, args interface{}) {
 	if err != nil {
 		c.mu.Lock()
 		if c.reachable {
-			fmt.Printf("%s⚠️  Peer %s unreachable (will suppress further failures)\n", c.prefix, c.addr)
+			fmt.Printf("%s[WARN] Peer %s unreachable (will suppress further failures)\n", c.prefix, c.addr)
 			c.reachable = false
 		}
 		c.mu.Unlock()
@@ -140,7 +140,7 @@ func (c *RPCClient) callAsync(method string, args interface{}) {
 	}
 	c.mu.Lock()
 	if !c.reachable {
-		fmt.Printf("%s✅  Peer %s is reachable again\n", c.prefix, c.addr)
+		fmt.Printf("%s[OK] Peer %s is reachable again\n", c.prefix, c.addr)
 		c.reachable = true
 	}
 	c.mu.Unlock()
@@ -148,7 +148,7 @@ func (c *RPCClient) callAsync(method string, args interface{}) {
 
 	var reply Empty
 	if err := client.Call(method, args, &reply); err != nil {
-		fmt.Printf("%s⚠️  RPC call %s failed: %v\n", c.prefix, method, err)
+		fmt.Printf("%s[WARN] RPC call %s failed: %v\n", c.prefix, method, err)
 	}
 }
 

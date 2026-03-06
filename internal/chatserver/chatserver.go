@@ -173,14 +173,14 @@ func (s *ChatServer) CreateRoom(name string) *ChatRoom {
 	defer s.mu.Unlock()
 
 	if existing, ok := s.rooms[name]; ok {
-		fmt.Printf("%s⚠️  Room \"%s\" already exists on this server\n", s.prefix, name)
+		fmt.Printf("%s[WARN] Room \"%s\" already exists on this server\n", s.prefix, name)
 		return existing
 	}
 
 	room := NewChatRoom(name)
 	s.rooms[name] = room
 
-	fmt.Printf("%s🏠 Created room \"%s\"\n", s.prefix, name)
+	fmt.Printf("%s[ROOM] Created room \"%s\"\n", s.prefix, name)
 	return room
 }
 
@@ -205,7 +205,7 @@ func (s *ChatServer) ConnectClient(clientID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clients[clientID] = true
-	fmt.Printf("%s👤 Client \"%s\" connected\n", s.prefix, clientID)
+	fmt.Printf("%s[CLIENT] Client \"%s\" connected\n", s.prefix, clientID)
 }
 
 func (s *ChatServer) SendMessage(roomName, sender, content string) bool {
@@ -214,12 +214,12 @@ func (s *ChatServer) SendMessage(roomName, sender, content string) bool {
 	s.mu.Unlock()
 
 	if !ok {
-		fmt.Printf("%s⚠️  Room \"%s\" not found on this server\n", s.prefix, roomName)
+		fmt.Printf("%s[WARN] Room \"%s\" not found on this server\n", s.prefix, roomName)
 		return false
 	}
 
 	room.AddMessage(sender, content)
-	fmt.Printf("%s💬 [%s] %s: %s\n", s.prefix, roomName, sender, content)
+	fmt.Printf("%s[MSG] [%s] %s: %s\n", s.prefix, roomName, sender, content)
 
 	// Fire the callback so the demo can relay to other servers
 	if s.OnMessageReceived != nil {
@@ -241,7 +241,7 @@ func (s *ChatServer) RelayMessage(roomName, sender, content string) bool {
 	}
 
 	room.AddMessage(sender, content)
-	fmt.Printf("%s📨 [RELAY] [%s] %s: %s\n", s.prefix, roomName, sender, content)
+	fmt.Printf("%s[RELAY] [%s] %s: %s\n", s.prefix, roomName, sender, content)
 	return true
 }
 
@@ -266,7 +266,7 @@ func (svc *ChatService) JoinRoom(args *JoinRoomArgs, reply *JoinRoomReply) error
 	room.Join(args.ClientID)
 	svc.server.ConnectClient(args.ClientID)
 
-	fmt.Printf("%s🚪 %s joined room \"%s\" via RPC\n", svc.server.prefix, args.ClientID, args.RoomName)
+	fmt.Printf("%s[JOIN] %s joined room \"%s\" via RPC\n", svc.server.prefix, args.ClientID, args.RoomName)
 	reply.OK = true
 	reply.Message = fmt.Sprintf("Joined room \"%s\" on server %s", args.RoomName, svc.server.ID)
 	return nil
@@ -323,7 +323,7 @@ func (s *ChatServer) StartRPC(addr string) error {
 		}
 	}()
 
-	fmt.Printf("%s📡 Chat RPC server started on %s\n", s.prefix, addr)
+	fmt.Printf("%s[RPC] Chat RPC server started on %s\n", s.prefix, addr)
 	return nil
 }
 

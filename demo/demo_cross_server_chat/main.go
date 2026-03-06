@@ -200,9 +200,9 @@ func main() {
 			"  Bob polls Server_Alpha and sees Alice's reply.")
 
 	// Bob sends a message
-	info("Bob sends: \"Hey Alice! Can you hear me across servers? 🎉\"")
+	info("Bob sends: \"Hey Alice! Can you hear me across servers?\"")
 	fmt.Println()
-	if err := bob.SendMessageRPC("General_Chat", "Hey Alice! Can you hear me across servers? 🎉"); err != nil {
+	if err := bob.SendMessageRPC("General_Chat", "Hey Alice! Can you hear me across servers?"); err != nil {
 		fail(fmt.Sprintf("Bob send failed: %v", err))
 	}
 
@@ -217,7 +217,7 @@ func main() {
 	} else {
 		fmt.Println()
 		for _, msg := range msgs {
-			fmt.Printf("  %s📩 Alice received: [%s] %s: %s%s\n",
+			fmt.Printf("  %s[RECV] Alice received: [%s] %s: %s%s\n",
 				types.ColorGreen+types.ColorBold, "General_Chat", msg.Sender, msg.Content, types.ColorReset)
 		}
 	}
@@ -225,9 +225,9 @@ func main() {
 	fmt.Println()
 
 	// Alice replies
-	info("Alice sends: \"Hi Bob! Yes, cross-server messaging works! 🚀\"")
+	info("Alice sends: \"Hi Bob! Yes, cross-server messaging works!\"")
 	fmt.Println()
-	if err := alice.SendMessageRPC("General_Chat", "Hi Bob! Yes, cross-server messaging works! 🚀"); err != nil {
+	if err := alice.SendMessageRPC("General_Chat", "Hi Bob! Yes, cross-server messaging works!"); err != nil {
 		fail(fmt.Sprintf("Alice send failed: %v", err))
 	}
 
@@ -242,7 +242,7 @@ func main() {
 	} else {
 		fmt.Println()
 		for _, msg := range msgs2 {
-			fmt.Printf("  %s📩 Bob received: [%s] %s: %s%s\n",
+			fmt.Printf("  %s[RECV] Bob received: [%s] %s: %s%s\n",
 				types.ColorGreen+types.ColorBold, "General_Chat", msg.Sender, msg.Content, types.ColorReset)
 		}
 	}
@@ -273,7 +273,7 @@ func main() {
 
 	fmt.Println()
 	if len(alphaMessages) == len(betaMessages) && len(alphaMessages) > 0 {
-		success(fmt.Sprintf("BOTH servers have %d messages — cross-server relay VERIFIED ✅", len(alphaMessages)))
+		success(fmt.Sprintf("BOTH servers have %d messages -- cross-server relay VERIFIED", len(alphaMessages)))
 	}
 	divider()
 
@@ -291,10 +291,10 @@ func main() {
 		}
 		fmt.Printf("  [%s Node %d]\n", role, n.ID)
 		for name, addr := range rt.Servers {
-			fmt.Printf("    🖥️  Server \"%s\" → %s\n", name, addr)
+			fmt.Printf("    Server \"%s\" -> %s\n", name, addr)
 		}
 		for name, entry := range rt.Rooms {
-			fmt.Printf("    🏠 Room \"%s\" → %s\n", name, entry.ServerAddr)
+			fmt.Printf("    Room \"%s\" -> %s\n", name, entry.ServerAddr)
 		}
 	}
 
@@ -309,15 +309,15 @@ func main() {
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  WHAT WE DEMONSTRATED:                                                  ║")
 	fmt.Println("║                                                                          ║")
-	fmt.Println("║  1. 🗳️  Raft Leader Election — 3 coordinators, 1 leader elected          ║")
-	fmt.Println("║  2. 📋 Raft Consensus — servers & rooms replicated to all nodes          ║")
-	fmt.Println("║  3. 🔒 Token Ring Mutex — room creation under mutual exclusion           ║")
-	fmt.Println("║  4. 🖥️  Chat Servers — 2 servers on separate TCP ports                   ║")
-	fmt.Println("║  5. 👥 Clients — Bob on Server_Alpha, Alice on Server_Beta               ║")
-	fmt.Println("║  6. 💬 Cross-Server Messaging:                                           ║")
-	fmt.Println("║       Bob (Server_Alpha) ──msg──▶ relay ──▶ Server_Beta (Alice)          ║")
-	fmt.Println("║       Alice (Server_Beta) ──msg──▶ relay ──▶ Server_Alpha (Bob)          ║")
-	fmt.Println("║  7. ✅ Both servers have identical message history                       ║")
+	fmt.Println("║  1. Raft Leader Election -- 3 coordinators, 1 leader elected             ║")
+	fmt.Println("║  2. Raft Consensus -- servers & rooms replicated to all nodes            ║")
+	fmt.Println("║  3. Token Ring Mutex -- room creation under mutual exclusion             ║")
+	fmt.Println("║  4. Chat Servers -- 2 servers on separate TCP ports                      ║")
+	fmt.Println("║  5. Clients -- Bob on Server_Alpha, Alice on Server_Beta                 ║")
+	fmt.Println("║  6. Cross-Server Messaging:                                              ║")
+	fmt.Println("║       Bob (Server_Alpha) --msg--> relay --> Server_Beta (Alice)           ║")
+	fmt.Println("║       Alice (Server_Beta) --msg--> relay --> Server_Alpha (Bob)           ║")
+	fmt.Println("║  7. Both servers have identical message history                           ║")
 	fmt.Println("║                                                                          ║")
 	fmt.Println("║  ARCHITECTURE:                                                           ║")
 	fmt.Println("║    Client ──RPC──▶ ChatServer ──relay──▶ ChatServer ──poll──▶ Client     ║")
@@ -363,15 +363,15 @@ func phase(tag, title, description string) {
 }
 
 func info(msg string) {
-	fmt.Printf("  %s⏳ %s%s\n", types.ColorCyan, msg, types.ColorReset)
+	fmt.Printf("  %s[WAIT] %s%s\n", types.ColorCyan, msg, types.ColorReset)
 }
 
 func success(msg string) {
-	fmt.Printf("  %s✅ %s%s\n", types.ColorGreen+types.ColorBold, msg, types.ColorReset)
+	fmt.Printf("  %s[OK] %s%s\n", types.ColorGreen+types.ColorBold, msg, types.ColorReset)
 }
 
 func fail(msg string) {
-	fmt.Printf("  %s❌ %s%s\n", types.ColorRed+types.ColorBold, msg, types.ColorReset)
+	fmt.Printf("  %s[FAIL] %s%s\n", types.ColorRed+types.ColorBold, msg, types.ColorReset)
 }
 
 func printResult(ok bool, msg string) {
